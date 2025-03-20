@@ -4,6 +4,10 @@ A Go library that makes it easy to integrate PHP code with Go applications using
 
 > It started as a joke... i think it's not a joke anymore!
 
+<p align="center">
+  <img src="./docs/gophp.png" width="400" height="400" alt="GoPHP Logo">
+</p>
+
 ⚠️: work in progress
 
 ## ⚠️ IMPORTANT: Prerequisites
