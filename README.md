@@ -1,5 +1,10 @@
 # Go-PHP TODO Application
 
+Yes it's working-ish
+
+![Go-PHP TODO Application](./docs/state.png)
+
+
 ### Prerequisites
 - Go 1.21 or later
 - PHP 8.2 or later **built with specific flags** (see Building PHP section)
