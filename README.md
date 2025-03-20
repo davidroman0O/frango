@@ -303,6 +303,7 @@ CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-c
 CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/router
 ```
 
+<!-- 
 ## Troubleshooting
 
 ### Common errors
@@ -336,7 +337,7 @@ CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-c
    cd frankenphp
    make
    ```
-
+ I will do more testing
 3. **Simplest alternative approach**
    Instead of trying to embed FrankenPHP in your Go application, consider:
    
@@ -358,7 +359,7 @@ CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-c
    Make sure the required PHP extensions are installed:
    ```bash
    pecl install redis
-   ```
+   ``` -->
 
 ## License
 
