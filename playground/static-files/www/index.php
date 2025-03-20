@@ -1,10 +1,33 @@
 <?php
+// Check if we're in development mode
+$devMode = empty($_SERVER['PHP_PRODUCTION']) || $_SERVER['PHP_PRODUCTION'] !== '1';
+
+// Only disable caching in development mode
+if ($devMode) {
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+    header("Pragma: no-cache");
+    header("Expires: 0");
+    
+    // Generate a timestamp for debugging
+    $timestamp = date('Y-m-d H:i:s.u');
+    $random = rand(1000, 9999);
+} else {
+    // In production, allow caching
+    $timestamp = date('Y-m-d H:i:s');
+    $random = 'PRODUCTION MODE';
+}
+
 // Home page
 ?>
 <!DOCTYPE html>
 <html>
 <head>
     <title>Static Files PHP Example</title>
+    <?php if ($devMode): ?>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <?php endif; ?>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -51,6 +74,7 @@
 <body>
     <div class="container">
         <h1>Static Files PHP Example</h1>
+        <p><strong>Timestamp: <?php echo $timestamp; ?> (<?php echo $random; ?>)</strong></p>
         <p>This example serves PHP files directly from a directory structure instead of embedding them.</p>
         
         <div class="links">

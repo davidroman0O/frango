@@ -1,11 +1,15 @@
-# Go-PHP TODO Application
+# GoPHP - Integrate PHP with Go using FrankenPHP
 
-Yes it's working-ish
+A Go library that makes it easy to integrate PHP code with Go applications using FrankenPHP.
 
-![Go-PHP TODO Application](./docs/state.png)
+> It started as a joke... i think it's not a joke anymore!
 
+⚠️: work in progress
 
-### Prerequisites
+## ⚠️ IMPORTANT: Prerequisites
+
+Before you begin, make sure you have all the prerequisites below. **The library will not work without properly built PHP.**
+
 - Go 1.21 or later
 - PHP 8.2 or later **built with specific flags** (see Building PHP section)
 - Required PHP extensions:
@@ -97,10 +101,202 @@ go mod tidy
 2. Run the application with the correct CGO flags:
 ```bash
 # Method 1: Using php-config
-CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./playground/hello/main.go
+CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/basic
 
 # Method 2: Explicitly setting the paths (try this if Method 1 fails)
-CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/include/php/Zend -I/usr/local/include/php/TSRM -I/usr/local/include/php/ext" CGO_LDFLAGS="-L/usr/local/lib -lphp" go run -tags=nowatcher ./playground/hello/main.go
+CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/include/php/Zend -I/usr/local/include/php/TSRM -I/usr/local/include/php/ext" CGO_LDFLAGS="-L/usr/local/lib -lphp" go run -tags=nowatcher ./examples/basic
+```
+
+## Important Notes About FrankenPHP
+
+Before using this library, be aware of these FrankenPHP characteristics:
+
+- It doesn't provide a built-in global memory store that persists across multiple PHP requests and workers.
+- It runs PHP scripts using Caddy and a worker pool model, which means:
+  - Each request is processed independently.
+  - PHP memory resets after each request (just like traditional FPM).
+  - There is no global memory space shared between requests by default.
+
+## Features
+
+- Serve PHP files directly from Go applications
+- Register explicit PHP endpoints for precise URL routing control
+- Mix PHP with native Go HTTP handlers in the same application
+- Automatic directory resolution for your PHP files
+- Support for both development and production modes
+- Advanced routing including HTTP method-based routing with path parameters (Go 1.22+)
+- Efficient caching for production environments
+- Embed PHP files directly in your Go binary
+- Use as middleware in existing Go HTTP applications
+
+## Installation
+
+```bash
+go get github.com/davidroman0O/go-php
+```
+
+## Quick Start
+
+```go
+package main
+
+import (
+	"log"
+	"github.com/davidroman0O/go-php"
+)
+
+func main() {
+	// Find web directory with automatic resolution
+	webDir, err := gophp.ResolveDirectory("web")
+	if err != nil {
+		log.Fatalf("Error finding web directory: %v", err)
+	}
+
+	// Create server with source directory
+	options := gophp.StaticHandlerOptions(webDir)
+	server, err := gophp.NewServer(options)
+	if err != nil {
+		log.Fatalf("Error creating server: %v", err)
+	}
+	defer server.Shutdown()
+
+	// Start serving PHP files
+	if err := server.ListenAndServe(":8082"); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+```
+
+## Core Concepts
+
+### Directory Resolution
+
+GoPHP automatically finds your web directory:
+
+```go
+webDir, err := gophp.ResolveDirectory("web")
+```
+
+This will try multiple search strategies:
+1. Check if the path exists as-is
+2. Look relative to the calling code
+3. Check relative to the current working directory
+
+### Running in Development vs Production Mode
+
+```go
+// Development mode (default)
+options := gophp.DefaultHandlerOptions()
+
+// Production mode
+options := gophp.DefaultHandlerOptions()
+options.DevelopmentMode = false
+options.CacheDuration = 300  // Cache responses for 5 minutes
+```
+
+### Registering Specific Endpoints
+
+```go
+// Register specific PHP endpoints
+server.RegisterEndpoint("/api/user", "api/user.php")
+server.RegisterEndpoint("/api/items", "api/items.php")
+
+// Register clean URLs (without .php extension)
+server.RegisterEndpoint("/about", "about.php")
+
+// Map multiple URLs to the same PHP file
+server.RegisterEndpoint("/", "index.php")
+server.RegisterEndpoint("/home", "index.php")
+
+// Mix with Go handlers
+server.RegisterCustomHandler("/api/time", myTimeHandler)
+```
+
+### Using Method-Based Routing (Go 1.22+)
+
+```go
+// Create a method router
+mux := server.CreateMethodRouter()
+
+// Register PHP endpoints with method constraints and path parameters
+server.RegisterPHPEndpoint("GET /users", "users_list.php")
+server.RegisterPHPEndpoint("POST /users", "users_create.php") 
+server.RegisterPHPEndpoint("GET /users/{id}", "user_detail.php")
+
+// Start the server with the router
+http.ListenAndServe(":8082", mux)
+```
+
+### Embedding PHP Files
+
+```go
+package main
+
+import (
+	"embed"
+	"github.com/davidroman0O/go-php"
+)
+
+//go:embed php/index.php
+var indexPhp embed.FS
+
+//go:embed php/api/user.php
+var userPhp embed.FS
+
+func main() {
+	options := gophp.DefaultHandlerOptions()
+	server, err := gophp.NewServer(options)
+	defer server.Shutdown()
+
+	// Add PHP files from embed.FS
+	indexPath := server.AddPHPFromEmbed("/index.php", indexPhp, "php/index.php")
+	userPath := server.AddPHPFromEmbed("/api/user.php", userPhp, "php/api/user.php")
+	
+	// Register endpoints
+	server.RegisterEndpoint("/", indexPath)
+	server.RegisterEndpoint("/api/user", userPath)
+	
+	server.ListenAndServe(":8082")
+}
+```
+
+### Using as Middleware
+
+```go
+// Create a standard HTTP mux
+mux := http.NewServeMux()
+
+// Add Go handlers
+mux.HandleFunc("/go/hello", myGoHandler)
+
+// Use PHP server as middleware
+phpServer, _ := gophp.NewServer(options)
+mux.Handle("/php/", http.StripPrefix("/php", phpServer))
+
+// Start server with the mux
+http.ListenAndServe(":8080", mux)
+```
+
+## Examples
+
+The library includes several examples to help you get started:
+
+- **Basic**: Simple PHP endpoint serving with automatic directory resolution
+- **Middleware**: Using GoPHP as middleware in an existing Go application
+- **Embed**: Embedding PHP files directly in your Go binary
+- **Router**: Advanced routing with method-based constraints and path parameters
+
+Run the examples with:
+
+```bash
+# Basic example
+CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/basic
+
+# Run in production mode
+CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/basic -prod
+
+# Router example with advanced routing
+CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/router
 ```
 
 ## Troubleshooting
@@ -159,10 +355,6 @@ CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/
    ```bash
    pecl install redis
    ```
-
-## Resources
-
-For more information on compiling FrankenPHP, see the [official documentation](https://github.com/dunglas/frankenphp/blob/main/docs/compile.md).
 
 ## License
 

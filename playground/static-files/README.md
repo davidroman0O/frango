@@ -9,6 +9,7 @@ This example demonstrates serving PHP files directly from a directory structure 
 - Edit PHP files directly without recompiling
 - Supports a complete directory structure
 - Handles static files seamlessly
+- Supports both development and production modes
 
 ## Files
 
@@ -20,15 +21,9 @@ This example demonstrates serving PHP files directly from a directory structure 
 
 ## Running the Application
 
-### From the Project Root
+### Development Mode (Default)
 
-```bash
-CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/include/php/Zend -I/usr/local/include/php/TSRM -I/usr/local/include/php/ext" \
-CGO_LDFLAGS="-L/usr/local/lib -lphp" \
-PORT=8082 go run -tags=nowatcher ./playground/static-files
-```
-
-### From the Static Files Directory
+For instant file change detection and no caching:
 
 ```bash
 cd playground/static-files
@@ -37,7 +32,33 @@ CGO_LDFLAGS="-L/usr/local/lib -lphp" \
 PORT=8082 go run -tags=nowatcher .
 ```
 
+### Production Mode
+
+For better performance with caching:
+
+```bash
+cd playground/static-files
+CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/include/php/Zend -I/usr/local/include/php/TSRM -I/usr/local/include/php/ext" \
+CGO_LDFLAGS="-L/usr/local/lib -lphp" \
+PHP_PRODUCTION=1 PORT=8082 go run -tags=nowatcher .
+```
+
 You can change the port by setting a different value for the `PORT` environment variable.
+
+## Modes Explained
+
+1. **Development Mode**:
+   - Detects file changes immediately
+   - Disables PHP opcache
+   - Adds no-cache headers to responses
+   - Displays timestamps for debugging
+   - Best for active development
+
+2. **Production Mode**:
+   - Checks for file changes less frequently (every 5 seconds)
+   - Enables PHP opcache
+   - Allows browser caching (60 seconds)
+   - Better performance for production use
 
 ## Accessing the Application
 
