@@ -52,6 +52,7 @@
             <a href="/demo">Go to Demo Page</a>
             <a href="/dynamic">Go to Dynamic Page</a>
             <a href="/dynamic?name=PHP+User&color=blue&count=3">Go to Dynamic Page with Parameters</a>
+            <a href="/stateful">Go to Stateful Page</a>
         </div>
     </div>
 </body>
