@@ -22,14 +22,20 @@
         h1 {
             color: #333;
         }
+        .links {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 20px;
+        }
         a {
             display: inline-block;
-            margin-top: 20px;
             padding: 10px 15px;
             background-color: #4CAF50;
             color: white;
             text-decoration: none;
             border-radius: 4px;
+            width: fit-content;
         }
         a:hover {
             background-color: #45a049;
@@ -42,7 +48,11 @@
         <p>This is a simple demonstration of a multi-page PHP application embedded in Go using FrankenPHP.</p>
         <p>You can navigate between different pages using the links below:</p>
         
-        <a href="/demo">Go to Demo Page</a>
+        <div class="links">
+            <a href="/demo">Go to Demo Page</a>
+            <a href="/dynamic">Go to Dynamic Page</a>
+            <a href="/dynamic?name=PHP+User&color=blue&count=3">Go to Dynamic Page with Parameters</a>
+        </div>
     </div>
 </body>
 </html> 

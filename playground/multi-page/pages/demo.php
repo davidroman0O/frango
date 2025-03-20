@@ -29,14 +29,20 @@ $current_time = date('Y-m-d H:i:s');
             border-radius: 4px;
             margin: 20px 0;
         }
+        .nav-links {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 20px;
+        }
         a {
             display: inline-block;
-            margin-top: 20px;
             padding: 10px 15px;
             background-color: #2196F3;
             color: white;
             text-decoration: none;
             border-radius: 4px;
+            width: fit-content;
         }
         a:hover {
             background-color: #0b7dda;
@@ -55,7 +61,11 @@ $current_time = date('Y-m-d H:i:s');
             <p>Server Software: <?php echo $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown'; ?></p>
         </div>
         
-        <a href="/">Back to Home Page</a>
+        <div class="nav-links">
+            <a href="/">Back to Home Page</a>
+            <a href="/dynamic">Go to Dynamic Page</a>
+            <a href="/dynamic?name=Demo+User&color=green&count=5">Go to Dynamic Page with Custom Parameters</a>
+        </div>
     </div>
 </body>
 </html> 
