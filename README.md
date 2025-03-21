@@ -1,11 +1,11 @@
-# frango - Integrate PHP with Go using FrankenPHP
+# Frango - Integrate PHP with Go using FrankenPHP
 
 A Go library that makes it easy to integrate PHP code with Go applications using FrankenPHP.
 
 > It started as a joke... i think it's not a joke anymore!
 
 <p align="center">
-  <img src="./docs/frango.png" width="400" height="400" alt="frango Logo">
+  <img src="./docs/gopher.png" width="400" height="400" alt="frango Logo">
 </p>
 
 ⚠️: work in progress
