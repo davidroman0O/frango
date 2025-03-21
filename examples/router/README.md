@@ -28,17 +28,13 @@ router/
 ## Running the Example
 
 ```bash
-# Make sure you have built PHP correctly for FrankenPHP (see main README)
-cd examples/router
-
-# Run with php-config dynamic flags
-CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher .
-
-# Or with explicit flags if php-config doesn't work
-CGO_CFLAGS="-I/usr/local/include/php -I/usr/local/include/php/main -I/usr/local/include/php/Zend -I/usr/local/include/php/TSRM -I/usr/local/include/php/ext" CGO_LDFLAGS="-L/usr/local/lib -lphp" go run -tags=nowatcher .
+# From the go-php directory
+go run -tags=nowatcher ./examples/router
 ```
 
 Then visit http://localhost:8082 in your browser.
+
+> **Important**: The `nowatcher` build tag is required to make this example work properly.
 
 ## Key Code Patterns
 
