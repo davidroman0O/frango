@@ -136,7 +136,7 @@ Before using this library, be aware of these FrankenPHP characteristics:
 ## Installation
 
 ```bash
-go get github.com/davidroman0O/go-php
+go get github.com/davidroman0O/gophp
 ```
 
 ## Quick Start
@@ -146,7 +146,7 @@ package main
 
 import (
 	"log"
-	"github.com/davidroman0O/go-php"
+	"github.com/davidroman0O/gophp"
 )
 
 func main() {
@@ -240,7 +240,7 @@ package main
 
 import (
 	"embed"
-	"github.com/davidroman0O/go-php"
+	"github.com/davidroman0O/gophp"
 )
 
 //go:embed php/index.php

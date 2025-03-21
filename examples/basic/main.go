@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	gophp "github.com/davidroman0O/go-php"
+	gophp "github.com/davidroman0O/gophp"
 )
 
 func main() {

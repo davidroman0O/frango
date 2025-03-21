@@ -1,4 +1,4 @@
-module github.com/davidroman0O/go-php
+module github.com/davidroman0O/gophp
 
 go 1.23.0
 
