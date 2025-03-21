@@ -223,6 +223,11 @@ func (s *Server) Initialize(ctx context.Context) error {
 		return nil
 	}
 
+	// Create a background context if nil is provided
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Check if context is canceled
 	select {
 	case <-ctx.Done():
@@ -262,6 +267,148 @@ func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
 
 	s.customHandlers[pattern] = handler
 	s.logger.Printf("Registered handler function for: %s", pattern)
+}
+
+// RenderFunc is a handler function type that can inject variables into PHP rendering
+type RenderFunc func(w http.ResponseWriter, r *http.Request) map[string]interface{}
+
+// HandleRender registers a handler that lets you inject variables into a PHP template before rendering
+func (s *Server) HandleRender(pattern string, phpFile string, renderFunc RenderFunc) {
+	// Ensure pattern starts with a slash
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
+	}
+
+	// Verify the PHP file exists
+	phpFilePath := phpFile
+	if !filepath.IsAbs(phpFile) {
+		phpFilePath = filepath.Join(s.sourceDir, phpFile)
+	}
+
+	// Check if the file exists
+	fileInfo, err := os.Stat(phpFilePath)
+	if err != nil {
+		s.logger.Printf("Error accessing PHP file %s: %v", phpFilePath, err)
+		return
+	}
+
+	if fileInfo.IsDir() {
+		s.logger.Printf("PHP file path is a directory: %s", phpFilePath)
+		return
+	}
+
+	// Register endpoint
+	s.endpoints[pattern] = phpFilePath
+	s.logger.Printf("Registered render endpoint: %s -> %s", pattern, phpFilePath)
+
+	// Register a handler for this pattern
+	s.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		// Get variables from the render function
+		variables := renderFunc(w, r)
+
+		// Create empty path parameters (could be extended later)
+		pathParams := make(map[string]string)
+
+		// Get or create environment for this endpoint
+		env, err := s.envCache.GetEnvironment(pattern, phpFilePath)
+		if err != nil {
+			s.logger.Printf("Error setting up environment for %s: %v", pattern, err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		// Calculate relative path to the PHP file
+		relPath, err := filepath.Rel(s.sourceDir, phpFilePath)
+		if err != nil {
+			s.logger.Printf("Error calculating relative path: %v", err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		// Calculate the path to the PHP file in the environment
+		phpFileInEnv := filepath.Join(env.TempPath, relPath)
+
+		// Ensure the PHP file is up to date in development mode
+		if s.options.DevelopmentMode {
+			s.envCache.mirrorFilesToEnvironment(env)
+		}
+
+		// Using the same approach as servePHPFileWithPathParams
+		// Calculate the document root and script name
+		documentRoot := filepath.Dir(phpFileInEnv)
+		scriptName := "/" + filepath.Base(phpFileInEnv)
+
+		s.logger.Printf("Running PHP with DocumentRoot=%s, ScriptName=%s", documentRoot, scriptName)
+
+		// Clone the request
+		reqClone := r.Clone(r.Context())
+
+		// Set URL path to script name (this is crucial for FrankenPHP to find the file)
+		reqClone.URL.Path = scriptName
+
+		// Setup PHP environment variables (same as servePHPFileWithPathParams)
+		phpEnv := map[string]string{
+			// DO NOT set SCRIPT_FILENAME - FrankenPHP does this automatically
+			"SCRIPT_NAME":    scriptName,
+			"PHP_SELF":       scriptName,
+			"DOCUMENT_ROOT":  documentRoot,
+			"REQUEST_URI":    r.URL.RequestURI(),
+			"REQUEST_METHOD": r.Method,
+			"QUERY_STRING":   r.URL.RawQuery,
+			"HTTP_HOST":      r.Host,
+		}
+
+		// Add debugging variables
+		phpEnv["DEBUG_DOCUMENT_ROOT"] = documentRoot
+		phpEnv["DEBUG_SCRIPT_NAME"] = scriptName
+		phpEnv["DEBUG_PHP_FILE_PATH"] = phpFileInEnv
+		phpEnv["DEBUG_URL_PATH"] = pattern
+		phpEnv["DEBUG_SOURCE_PATH"] = phpFilePath
+		phpEnv["DEBUG_ENV_ID"] = env.ID
+
+		// Add path parameters
+		if len(pathParams) > 0 {
+			// Create a JSON string with all path parameters
+			pathParamsJSON, _ := json.Marshal(pathParams)
+			phpEnv["PATH_PARAMS"] = string(pathParamsJSON)
+
+			// Also add individual path parameters for easier access
+			for name, value := range pathParams {
+				phpEnv["PATH_PARAM_"+strings.ToUpper(name)] = value
+			}
+		}
+
+		// Add custom variables from the render function
+		for key, value := range variables {
+			jsonValue, err := json.Marshal(value)
+			if err != nil {
+				s.logger.Printf("Error marshaling variable %s: %v", key, err)
+				continue
+			}
+
+			// Add as environment variable
+			phpEnv["GOPHP_VAR_"+key] = string(jsonValue)
+		}
+
+		// Create FrankenPHP request with the same approach as servePHPFileWithPathParams
+		req, err := frankenphp.NewRequestWithContext(
+			reqClone,
+			frankenphp.WithRequestDocumentRoot(documentRoot, false),
+			frankenphp.WithRequestEnv(phpEnv),
+		)
+		if err != nil {
+			s.logger.Printf("Error creating PHP request: %v", err)
+			http.Error(w, "Server error", http.StatusInternalServerError)
+			return
+		}
+
+		// Execute PHP
+		if err := frankenphp.ServeHTTP(w, req); err != nil {
+			s.logger.Printf("Error executing PHP: %v", err)
+			http.Error(w, "PHP execution error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
 }
 
 // HandleDir registers all PHP files in a directory under a URL prefix

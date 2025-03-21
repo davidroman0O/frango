@@ -233,6 +233,67 @@ server.Handle("GET /users/{id}", "user_detail.php")
 http.ListenAndServe(":8082", mux)
 ```
 
+### Using the Render Function to Inject Variables
+
+```go
+// Register a render handler
+server.HandleRender("/dashboard", "dashboard.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+    // Return a map of variables to inject into the PHP context
+    return map[string]interface{}{
+        "user": map[string]interface{}{
+            "id":    42,
+            "name":  "John Doe",
+            "email": "john@example.com",
+            "role":  "Administrator",
+        },
+        "stats": map[string]interface{}{
+            "visits": 12435,
+            "conversions": 532,
+            "revenue": 95432.50,
+        },
+        "items": []map[string]interface{}{
+            {"id": 1, "name": "Product A", "price": 19.99},
+            {"id": 2, "name": "Product B", "price": 29.99},
+            {"id": 3, "name": "Product C", "price": 39.99},
+        },
+    }
+})
+```
+
+In your PHP file, you can access these variables using the helper functions:
+
+```php
+<?php
+// Include the helper functions
+include_once 'render_helper.php';
+
+// Get individual variables with defaults
+$user = go_var('user', []);
+$stats = go_var('stats', []);
+$items = go_var('items', []);
+
+// Or get all variables at once
+$allVars = go_vars();
+?>
+
+<h1>Dashboard for <?= htmlspecialchars($user['name']) ?></h1>
+
+<div class="stats">
+    <p>Total Visits: <?= number_format($stats['visits']) ?></p>
+    <p>Conversions: <?= number_format($stats['conversions']) ?></p>
+    <p>Revenue: $<?= number_format($stats['revenue'], 2) ?></p>
+</div>
+
+<h2>Product List</h2>
+<ul>
+    <?php foreach ($items as $item): ?>
+    <li>
+        <?= htmlspecialchars($item['name']) ?> - $<?= number_format($item['price'], 2) ?>
+    </li>
+    <?php endforeach; ?>
+</ul>
+```
+
 ### Embedding PHP Files
 
 ```go
