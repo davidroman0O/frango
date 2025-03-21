@@ -1,4 +1,4 @@
-# GoPHP Redis Example
+# frango Redis Example
 
 This example demonstrates how to use Redis with PHP in a Go application using the go-php library. It uses a pure PHP Redis client implementation to avoid extension compatibility issues.
 

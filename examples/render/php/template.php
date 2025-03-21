@@ -9,7 +9,7 @@
  * @return mixed The variable value
  */
 function go_var($name, $default = null) {
-    $envKey = "GOPHP_VAR_" . $name;
+    $envKey = "frango_VAR_" . $name;
     
     if (!isset($_SERVER[$envKey])) {
         return $default;
@@ -34,7 +34,7 @@ function go_var($name, $default = null) {
  */
 function go_vars() {
     $vars = [];
-    $prefix = "GOPHP_VAR_";
+    $prefix = "frango_VAR_";
     $prefixLen = strlen($prefix);
     
     foreach ($_SERVER as $key => $value) {

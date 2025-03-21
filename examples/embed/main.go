@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	gophp "github.com/davidroman0O/gophp"
+	frango "github.com/davidroman0O/frango"
 )
 
 // Embed the PHP files directly
@@ -31,8 +31,8 @@ func main() {
 	flag.Parse()
 
 	// Create a server with functional options
-	server, err := gophp.NewServer(
-		gophp.WithDevelopmentMode(!*prodMode),
+	server, err := frango.NewServer(
+		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)

@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	gophp "github.com/davidroman0O/gophp"
+	frango "github.com/davidroman0O/frango"
 )
 
 // User represents a user in the system
@@ -109,16 +109,16 @@ func main() {
 	flag.Parse()
 
 	// Find the web directory
-	webDir, err := gophp.ResolveDirectory("examples/router/web")
+	webDir, err := frango.ResolveDirectory("examples/router/web")
 	if err != nil {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 	log.Printf("Using web directory: %s", webDir)
 
 	// Create server instance with functional options
-	server, err := gophp.NewServer(
-		gophp.WithSourceDir(webDir),
-		gophp.WithDevelopmentMode(!*prodMode),
+	server, err := frango.NewServer(
+		frango.WithSourceDir(webDir),
+		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)

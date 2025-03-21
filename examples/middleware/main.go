@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	gophp "github.com/davidroman0O/gophp"
+	frango "github.com/davidroman0O/frango"
 )
 
 func main() {
@@ -21,13 +21,13 @@ func main() {
 	flag.Parse()
 
 	// Find the web directory using library's built-in function
-	webDir, err := gophp.ResolveDirectory("examples/middleware/web")
+	webDir, err := frango.ResolveDirectory("examples/middleware/web")
 	if err != nil {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 
 	// Also find the static directory
-	staticDir, err := gophp.ResolveDirectory("examples/middleware/static")
+	staticDir, err := frango.ResolveDirectory("examples/middleware/static")
 	if err != nil {
 		log.Fatalf("Error finding static directory: %v", err)
 	}
@@ -36,9 +36,9 @@ func main() {
 	log.Printf("Using static directory: %s", staticDir)
 
 	// Create server instance with functional options
-	server, err := gophp.NewServer(
-		gophp.WithSourceDir(webDir),
-		gophp.WithDevelopmentMode(!*prodMode),
+	server, err := frango.NewServer(
+		frango.WithSourceDir(webDir),
+		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)

@@ -3,19 +3,19 @@ package main
 import (
 	"log"
 
-	gophp "github.com/davidroman0O/gophp"
+	frango "github.com/davidroman0O/frango"
 )
 
 func main() {
 	// Find web directory with automatic resolution
-	webDir, err := gophp.ResolveDirectory("www")
+	webDir, err := frango.ResolveDirectory("www")
 	if err != nil {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 
 	// Create server with functional options
-	server, err := gophp.NewServer(
-		gophp.WithSourceDir(webDir),
+	server, err := frango.NewServer(
+		frango.WithSourceDir(webDir),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)

@@ -1,11 +1,11 @@
-# GoPHP - Integrate PHP with Go using FrankenPHP
+# frango - Integrate PHP with Go using FrankenPHP
 
 A Go library that makes it easy to integrate PHP code with Go applications using FrankenPHP.
 
 > It started as a joke... i think it's not a joke anymore!
 
 <p align="center">
-  <img src="./docs/gophp.png" width="400" height="400" alt="GoPHP Logo">
+  <img src="./docs/frango.png" width="400" height="400" alt="frango Logo">
 </p>
 
 ⚠️: work in progress
@@ -136,7 +136,7 @@ Before using this library, be aware of these FrankenPHP characteristics:
 ## Installation
 
 ```bash
-go get github.com/davidroman0O/gophp
+go get github.com/davidroman0O/frango
 ```
 
 ## Quick Start
@@ -146,19 +146,19 @@ package main
 
 import (
 	"log"
-	"github.com/davidroman0O/gophp"
+	"github.com/davidroman0O/frango"
 )
 
 func main() {
 	// Find web directory with automatic resolution
-	webDir, err := gophp.ResolveDirectory("web")
+	webDir, err := frango.ResolveDirectory("web")
 	if err != nil {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 
 	// Create server with functional options
-	server, err := gophp.NewServer(
-		gophp.WithSourceDir(webDir),
+	server, err := frango.NewServer(
+		frango.WithSourceDir(webDir),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
@@ -176,10 +176,10 @@ func main() {
 
 ### Directory Resolution
 
-GoPHP automatically finds your web directory:
+frango automatically finds your web directory:
 
 ```go
-webDir, err := gophp.ResolveDirectory("web")
+webDir, err := frango.ResolveDirectory("web")
 ```
 
 This will try multiple search strategies:
@@ -191,12 +191,12 @@ This will try multiple search strategies:
 
 ```go
 // Development mode (default)
-server, err := gophp.NewServer() // Default is development mode
+server, err := frango.NewServer() // Default is development mode
 
 // Production mode
-server, err := gophp.NewServer(
-    gophp.WithDevelopmentMode(false),
-    gophp.WithCacheDuration(300), // Cache responses for 5 minutes
+server, err := frango.NewServer(
+    frango.WithDevelopmentMode(false),
+    frango.WithCacheDuration(300), // Cache responses for 5 minutes
 )
 ```
 
@@ -301,7 +301,7 @@ package main
 
 import (
 	"embed"
-	"github.com/davidroman0O/gophp"
+	"github.com/davidroman0O/frango"
 )
 
 //go:embed php/index.php
@@ -311,7 +311,7 @@ var indexPhp embed.FS
 var userPhp embed.FS
 
 func main() {
-	server, err := gophp.NewServer()
+	server, err := frango.NewServer()
 	defer server.Shutdown()
 
 	// Add PHP files from embed.FS
@@ -336,7 +336,7 @@ mux := http.NewServeMux()
 mux.HandleFunc("/go/hello", myGoHandler)
 
 // Use PHP server as middleware
-phpServer, _ := gophp.NewServer(options)
+phpServer, _ := frango.NewServer(options)
 mux.Handle("/php/", http.StripPrefix("/php", phpServer))
 
 // Start server with the mux
@@ -348,7 +348,7 @@ http.ListenAndServe(":8080", mux)
 The library includes several examples to help you get started:
 
 - **Basic**: Simple PHP endpoint serving with automatic directory resolution
-- **Middleware**: Using GoPHP as middleware in an existing Go application
+- **Middleware**: Using frango as middleware in an existing Go application
 - **Embed**: Embedding PHP files directly in your Go binary
 - **Router**: Advanced routing with method-based constraints and path parameters
 

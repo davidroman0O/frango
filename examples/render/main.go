@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/davidroman0O/gophp"
+	"github.com/davidroman0O/frango"
 )
 
 func main() {
 	// Find the example directory with PHP files
-	phpDir, err := gophp.ResolveDirectory("php")
+	phpDir, err := frango.ResolveDirectory("php")
 	if err != nil {
 		log.Fatalf("Error finding PHP directory: %v", err)
 	}
@@ -19,9 +19,9 @@ func main() {
 	log.Printf("PHP directory: %s", phpDir)
 
 	// Create a new PHP server with the PHP directory as source
-	server, err := gophp.NewServer(
-		gophp.WithSourceDir(phpDir),
-		gophp.WithDevelopmentMode(true),
+	server, err := frango.NewServer(
+		frango.WithSourceDir(phpDir),
+		frango.WithDevelopmentMode(true),
 	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)

@@ -1,6 +1,6 @@
-// Package gophp provides a simple way to integrate PHP code with Go applications
+// Package frango provides a simple way to integrate PHP code with Go applications
 // using FrankenPHP.
-package gophp
+package frango
 
 import (
 	"context"
@@ -180,7 +180,7 @@ func NewServer(opts ...Option) (*Server, error) {
 
 	// If sourceDir is empty, create a temp directory for embedded files
 	if server.options.SourceDir == "" {
-		absSourceDir, err = os.MkdirTemp("", "gophp-server")
+		absSourceDir, err = os.MkdirTemp("", "frango-server")
 		if err != nil {
 			return nil, fmt.Errorf("error creating temporary directory: %w", err)
 		}
@@ -193,7 +193,7 @@ func NewServer(opts ...Option) (*Server, error) {
 	}
 
 	// Create temporary directory for environments
-	tempDir, err := os.MkdirTemp("", "gophp-environments")
+	tempDir, err := os.MkdirTemp("", "frango-environments")
 	if err != nil {
 		return nil, fmt.Errorf("error creating temporary directory: %w", err)
 	}
@@ -203,7 +203,7 @@ func NewServer(opts ...Option) (*Server, error) {
 		if server.options.Logger != nil {
 			server.logger = server.options.Logger
 		} else {
-			server.logger = log.New(os.Stdout, "[GoPHP] ", log.LstdFlags)
+			server.logger = log.New(os.Stdout, "[frango] ", log.LstdFlags)
 		}
 	}
 
@@ -387,7 +387,7 @@ func (s *Server) HandleRender(pattern string, phpFile string, renderFunc RenderF
 			}
 
 			// Add as environment variable
-			phpEnv["GOPHP_VAR_"+key] = string(jsonValue)
+			phpEnv["frango_VAR_"+key] = string(jsonValue)
 		}
 
 		// Create FrankenPHP request with the same approach as servePHPFileWithPathParams

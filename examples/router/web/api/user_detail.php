@@ -10,7 +10,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 // Extract user ID from the URL path parameters
-// In GoPHP with method-based routing, path parameters are stored in $_SERVER['PATH_PARAMS']
+// In frango with method-based routing, path parameters are stored in $_SERVER['PATH_PARAMS']
 // Try to get ID from PATH_PARAMS first (newer method)
 $userId = null;
 if (isset($_SERVER['PATH_PARAMS'])) {

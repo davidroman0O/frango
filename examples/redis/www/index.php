@@ -23,20 +23,20 @@ try {
         $redisInfo = $redis->info();
         
         // Set a test key if it doesn't exist
-        if (!$redis->exists('gophp_test_counter')) {
-            $redis->set('gophp_test_counter', 0);
+        if (!$redis->exists('frango_test_counter')) {
+            $redis->set('frango_test_counter', 0);
         }
         
         // Increment the counter
-        $counter = $redis->incr('gophp_test_counter');
+        $counter = $redis->incr('frango_test_counter');
         
         // Set a timestamp for this visit
         $timestamp = time();
-        $redis->set('gophp_last_visit', $timestamp);
-        $redis->set('gophp_last_visit_formatted', date('Y-m-d H:i:s', $timestamp));
+        $redis->set('frango_last_visit', $timestamp);
+        $redis->set('frango_last_visit_formatted', date('Y-m-d H:i:s', $timestamp));
         
-        // Get all keys matching the gophp pattern
-        $redisKeys = $redis->keys('gophp_*');
+        // Get all keys matching the frango pattern
+        $redisKeys = $redis->keys('frango_*');
         if (!is_array($redisKeys)) {
             $redisKeys = [];
         }
@@ -53,7 +53,7 @@ $timestamp = date('Y-m-d H:i:s');
 <!DOCTYPE html>
 <html>
 <head>
-    <title>GoPHP Redis Example</title>
+    <title>frango Redis Example</title>
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
@@ -123,7 +123,7 @@ $timestamp = date('Y-m-d H:i:s');
 </head>
 <body>
     <div class="container">
-        <h1>GoPHP Redis Example</h1>
+        <h1>frango Redis Example</h1>
         
         <h2>PHP Information</h2>
         <table>
@@ -167,7 +167,7 @@ $timestamp = date('Y-m-d H:i:s');
         <?php if ($redisConnected): ?>
         <h2>Redis Test Counter</h2>
         <p>This page has been viewed <?php echo $counter; ?> times since the counter was initialized.</p>
-        <p>Last visit: <?php echo $redis->get('gophp_last_visit_formatted'); ?></p>
+        <p>Last visit: <?php echo $redis->get('frango_last_visit_formatted'); ?></p>
 
         <h2>Redis Keys</h2>
         <table>

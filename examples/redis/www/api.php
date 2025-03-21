@@ -25,7 +25,7 @@ $segments = explode('/', trim($path, '/'));
 $endpoint = end($segments);
 
 // Redis key prefix for this API
-$keyPrefix = 'gophp_api_';
+$keyPrefix = 'frango_api_';
 
 // Process the request
 switch ($method) {

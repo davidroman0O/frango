@@ -29,4 +29,4 @@ A REST API that uses Redis as a data store. It supports:
 - PUT requests to update existing items
 - DELETE requests to remove items
 
-All data is stored as JSON in Redis with keys prefixed with `gophp_api_`. 
+All data is stored as JSON in Redis with keys prefixed with `frango_api_`. 

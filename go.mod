@@ -1,4 +1,4 @@
-module github.com/davidroman0O/gophp
+module github.com/davidroman0O/frango
 
 go 1.23.0
 

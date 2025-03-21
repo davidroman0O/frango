@@ -24,7 +24,7 @@ The example demonstrates the data flow between Go and PHP:
 
 1. A Go handler function returns a map of variables
 2. Go-PHP converts these variables to JSON and passes them to PHP
-3. Inside the PHP template, variables are accessible using the `$gophp->var('name')` syntax
+3. Inside the PHP template, variables are accessible using the `$frango->var('name')` syntax
 4. The PHP template renders dynamic HTML using the variables from Go
 
 ## Running the Example
@@ -72,12 +72,12 @@ server.HandleRender("/", "template.php", func(w http.ResponseWriter, r *http.Req
 In the PHP template, access the variables like this:
 
 ```php
-<h1><?= $gophp->var('title') ?></h1>
+<h1><?= $frango->var('title') ?></h1>
 
 <!-- Accessing nested objects -->
 <div class="user-info">
-    <p>Name: <?= $gophp->var('user')['name'] ?></p>
-    <p>Email: <?= $gophp->var('user')['email'] ?></p>
+    <p>Name: <?= $frango->var('user')['name'] ?></p>
+    <p>Email: <?= $frango->var('user')['email'] ?></p>
 </div>
 ```
 
