@@ -30,12 +30,10 @@ func main() {
 	prodMode := flag.Bool("prod", false, "Enable production mode")
 	flag.Parse()
 
-	// Setup options
-	options := gophp.DefaultHandlerOptions() // Default options with empty SourceDir for embedded files
-	options.DevelopmentMode = !*prodMode
-
-	// Create a server (empty source dir will create a temp directory)
-	server, err := gophp.NewServer(options)
+	// Create a server with functional options
+	server, err := gophp.NewServer(
+		gophp.WithDevelopmentMode(!*prodMode),
+	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
@@ -48,18 +46,18 @@ func main() {
 	itemsPath := server.AddPHPFromEmbed("/api/items.php", itemsPhp, "php/api/items.php")
 
 	// Now explicitly register the endpoints
-	server.RegisterEndpoint("/", indexPath)          // Root path
-	server.RegisterEndpoint("/index", indexPath)     // Without .php extension
-	server.RegisterEndpoint("/index.php", indexPath) // With .php extension
+	server.HandlePHP("/", indexPath)          // Root path
+	server.HandlePHP("/index", indexPath)     // Without .php extension
+	server.HandlePHP("/index.php", indexPath) // With .php extension
 
-	server.RegisterEndpoint("/api/user", userPath)
-	server.RegisterEndpoint("/api/user.php", userPath)
+	server.HandlePHP("/api/user", userPath)
+	server.HandlePHP("/api/user.php", userPath)
 
-	server.RegisterEndpoint("/api/items", itemsPath)
-	server.RegisterEndpoint("/api/items.php", itemsPath)
+	server.HandlePHP("/api/items", itemsPath)
+	server.HandlePHP("/api/items.php", itemsPath)
 
 	// Register a custom Go handler
-	server.RegisterCustomHandler("/api/time", func(w http.ResponseWriter, r *http.Request) {
+	server.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"time": "` + time.Now().Format(time.RFC3339) + `", "source": "go"}`))
 	})

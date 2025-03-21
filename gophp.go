@@ -3,6 +3,7 @@
 package gophp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,16 +20,6 @@ import (
 
 	"github.com/dunglas/frankenphp"
 )
-
-// PHPFile represents a cached PHP file - DEPRECATED, use EnvironmentCache instead
-type PHPFile struct {
-	SourcePath   string    // Original file path
-	TempPath     string    // Path in temp directory
-	LastModified time.Time // Last modified time
-	LastSize     int64     // Last file size
-	LastChecked  time.Time // Last time we checked for changes
-	mutex        sync.Mutex
-}
 
 // HandlerOptions configures how PHP files are served
 type HandlerOptions struct {
@@ -70,20 +61,20 @@ type EmbedOptions struct {
 
 // PHPFileOptions configures behavior when adding PHP files
 type PHPFileOptions struct {
-	// RegisterEndpoints determines whether endpoints should be automatically registered
-	RegisterEndpoints bool
-	// RegisterCleanPath registers the path without .php extension
-	RegisterCleanPath bool
-	// RegisterRoot for index.php files, also register at "/"
-	RegisterRoot bool
+	// HandleEndpoints determines whether endpoints should be automatically registered
+	HandleEndpoints bool
+	// HandleCleanPath registers the path without .php extension
+	HandleCleanPath bool
+	// HandleRoot for index.php files, also register at "/"
+	HandleRoot bool
 }
 
 // DefaultPHPFileOptions returns default options for adding PHP files
 func DefaultPHPFileOptions() PHPFileOptions {
 	return PHPFileOptions{
-		RegisterEndpoints: false, // Don't register automatically by default
-		RegisterCleanPath: false,
-		RegisterRoot:      false,
+		HandleEndpoints: false, // Don't register automatically by default
+		HandleCleanPath: false,
+		HandleRoot:      false,
 	}
 }
 
@@ -98,12 +89,13 @@ func DefaultHandlerOptions() HandlerOptions {
 	}
 }
 
-// StaticHandlerOptions returns handler options for a directory of static PHP files
-func StaticHandlerOptions(sourceDir string) HandlerOptions {
-	options := DefaultHandlerOptions()
-	options.SourceDir = sourceDir
-	return options
-}
+// // I need to debate with myself about this one
+// // StaticHandlerOptions returns handler options for a directory of static PHP files
+// func StaticHandlerOptions(sourceDir string) HandlerOptions {
+// 	options := DefaultHandlerOptions()
+// 	options.SourceDir = sourceDir
+// 	return options
+// }
 
 // ResolveDirectory resolves a directory path, supporting both absolute and relative paths.
 // It tries multiple strategies to find the directory:
@@ -165,20 +157,36 @@ func ResolveDirectory(path string) (string, error) {
 	return "", fmt.Errorf("directory not found: %s", path)
 }
 
-// NewServer creates a new PHP server
-func NewServer(options HandlerOptions) (*Server, error) {
+// NewServer creates a new PHP server with the given options
+func NewServer(opts ...Option) (*Server, error) {
+	// Default options
+	options := DefaultHandlerOptions()
+
+	// Create server with default options
+	server := &Server{
+		options:        options,
+		endpoints:      make(map[string]string),
+		customHandlers: make(map[string]http.HandlerFunc),
+		embedFiles:     make(map[string]any),
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(server)
+	}
+
 	var absSourceDir string
 	var err error
 
 	// If sourceDir is empty, create a temp directory for embedded files
-	if options.SourceDir == "" {
+	if server.options.SourceDir == "" {
 		absSourceDir, err = os.MkdirTemp("", "gophp-server")
 		if err != nil {
 			return nil, fmt.Errorf("error creating temporary directory: %w", err)
 		}
 	} else {
 		// Resolve source directory using the path resolution function
-		absSourceDir, err = ResolveDirectory(options.SourceDir)
+		absSourceDir, err = ResolveDirectory(server.options.SourceDir)
 		if err != nil {
 			return nil, fmt.Errorf("error resolving source directory: %w", err)
 		}
@@ -190,84 +198,36 @@ func NewServer(options HandlerOptions) (*Server, error) {
 		return nil, fmt.Errorf("error creating temporary directory: %w", err)
 	}
 
-	// Set up logger
-	logger := options.Logger
-	if logger == nil {
-		logger = log.New(os.Stdout, "[GoPHP] ", log.LstdFlags)
+	// Set up logger if not already set
+	if server.logger == nil {
+		if server.options.Logger != nil {
+			server.logger = server.options.Logger
+		} else {
+			server.logger = log.New(os.Stdout, "[GoPHP] ", log.LstdFlags)
+		}
 	}
 
-	// Create server
-	server := &Server{
-		options:        options,
-		sourceDir:      absSourceDir,
-		tempDir:        tempDir,
-		logger:         logger,
-		endpoints:      make(map[string]string),
-		customHandlers: make(map[string]http.HandlerFunc),
-		embedFiles:     make(map[string]any),
-	}
+	// Update server with resolved paths
+	server.sourceDir = absSourceDir
+	server.tempDir = tempDir
 
 	// Create environment cache
-	server.envCache = NewEnvironmentCache(absSourceDir, tempDir, logger, options.DevelopmentMode)
+	server.envCache = NewEnvironmentCache(absSourceDir, tempDir, server.logger, server.options.DevelopmentMode)
 
 	return server, nil
 }
 
-// NewServerWithEmbed creates a new PHP server with embedded files
-// For file-by-file embedding (recommended):
-//   - Pass nil for embedFS
-//   - Pass "" for embedPath
-//   - Use AddEmbeddedFile to add individual files
-//
-// For whole directory embedding (legacy approach):
-//   - Pass an embed.FS for embedFS
-//   - Pass the base path within the embedded filesystem for embedPath
-func NewServerWithEmbed(embedFS any, embedPath string, options HandlerOptions) (*Server, error) {
-	// Create temporary directory
-	tempDir, err := os.MkdirTemp("", "gophp-embed")
-	if err != nil {
-		return nil, fmt.Errorf("error creating temporary directory: %w", err)
-	}
-
-	// Set up logger
-	logger := options.Logger
-	if logger == nil {
-		logger = log.New(os.Stdout, "[GoPHP] ", log.LstdFlags)
-	}
-
-	// Create server
-	server := &Server{
-		options:        options,
-		sourceDir:      tempDir, // Use tempDir as the source directory
-		tempDir:        tempDir,
-		logger:         logger,
-		endpoints:      make(map[string]string),
-		customHandlers: make(map[string]http.HandlerFunc),
-		embedFS:        embedFS,
-		embedPath:      embedPath,
-		embedFiles:     make(map[string]any),
-	}
-
-	// Log creation based on approach
-	if embedFS == nil {
-		server.logger.Printf("Created server for individual embedded PHP files")
-	} else {
-		server.logger.Printf("Created server with embedded PHP files directory (path: %s)", embedPath)
-	}
-
-	return server, nil
-}
-
-// NewEmbedServer creates a new PHP server for embedded files using the recommended
-// file-by-file approach. Use the AddEmbeddedFile method to add PHP files.
-func NewEmbedServer(options HandlerOptions) (*Server, error) {
-	return NewServerWithEmbed(nil, "", options)
-}
-
-// Initialize initializes the PHP environment
-func (s *Server) Initialize() error {
+// Initialize initializes the PHP environment with context
+func (s *Server) Initialize(ctx context.Context) error {
 	if s.initialized {
 		return nil
+	}
+
+	// Check if context is canceled
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	// Initialize FrankenPHP
@@ -293,51 +253,27 @@ func (s *Server) Shutdown() {
 	os.RemoveAll(s.tempDir)
 }
 
-// RegisterEndpoint maps a URL path to a PHP file
-func (s *Server) RegisterEndpoint(urlPath, phpFilePath string) {
+// HandleFunc registers a custom Go handler function for a specific URL pattern
+func (s *Server) HandleFunc(pattern string, handler http.HandlerFunc) {
 	// Ensure URL path starts with a slash
-	if !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
 	}
 
-	// If the PHP file is not an absolute path, make it relative to source dir
-	if !filepath.IsAbs(phpFilePath) {
-		phpFilePath = filepath.Join(s.sourceDir, phpFilePath)
-	}
-
-	// Store the mapping
-	s.endpoints[urlPath] = phpFilePath
-
-	// Pre-create the environment for this endpoint
-	_, err := s.envCache.GetEnvironment(urlPath, phpFilePath)
-	if err != nil {
-		s.logger.Printf("Warning: Failed to pre-create environment for %s: %v", urlPath, err)
-	}
-
-	s.logger.Printf("Registered endpoint: %s -> %s", urlPath, phpFilePath)
+	s.customHandlers[pattern] = handler
+	s.logger.Printf("Registered handler function for: %s", pattern)
 }
 
-// RegisterCustomHandler registers a custom Go handler for a specific URL path
-func (s *Server) RegisterCustomHandler(urlPath string, handler http.HandlerFunc) {
-	// Ensure URL path starts with a slash
-	if !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
-	}
-
-	s.customHandlers[urlPath] = handler
-	s.logger.Printf("Registered custom handler for: %s", urlPath)
-}
-
-// RegisterPHPDirectory registers all PHP files in a directory under a URL prefix
-func (s *Server) RegisterPHPDirectory(urlPrefix, dirPath string) error {
+// HandleDir registers all PHP files in a directory under a URL prefix
+func (s *Server) HandleDir(prefix string, dirPath string) error {
 	// Ensure URL prefix starts with a slash
-	if !strings.HasPrefix(urlPrefix, "/") {
-		urlPrefix = "/" + urlPrefix
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
 	}
 
 	// If trailing slash, remove it
-	if urlPrefix != "/" && strings.HasSuffix(urlPrefix, "/") {
-		urlPrefix = urlPrefix[:len(urlPrefix)-1]
+	if prefix != "/" && strings.HasSuffix(prefix, "/") {
+		prefix = prefix[:len(prefix)-1]
 	}
 
 	// If the directory is not an absolute path, make it relative to source dir
@@ -379,17 +315,17 @@ func (s *Server) RegisterPHPDirectory(urlPrefix, dirPath string) error {
 			relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
 
 			// Create URL path
-			urlPath := urlPrefix
-			if urlPrefix != "/" {
-				urlPath = urlPrefix + "/"
+			urlPath := prefix
+			if prefix != "/" {
+				urlPath = prefix + "/"
 			}
 			urlPath += relPath
 
 			// Remove .php extension for cleaner URLs (will be added back when needed)
 			urlPath = strings.TrimSuffix(urlPath, ".php")
 
-			// Register endpoint
-			s.RegisterEndpoint(urlPath, path)
+			// Register endpoint using HandlePHP
+			s.HandlePHP(urlPath, path)
 			count++
 		}
 
@@ -400,7 +336,7 @@ func (s *Server) RegisterPHPDirectory(urlPrefix, dirPath string) error {
 		return fmt.Errorf("error walking directory: %w", err)
 	}
 
-	s.logger.Printf("Registered %d PHP files from directory %s under %s", count, dirPath, urlPrefix)
+	s.logger.Printf("Registered %d PHP files from directory %s under %s", count, dirPath, prefix)
 	return nil
 }
 
@@ -411,87 +347,203 @@ func findPathInEmbedFS(embedFS any) (string, error) {
 	// Get the value of the embed.FS
 	val := reflect.ValueOf(embedFS)
 
-	// First try using the ReadDir method (available in Go 1.16+)
+	// Try using the ReadDir method (available in Go 1.16+)
 	readDirMethod := val.MethodByName("ReadDir")
 	if readDirMethod.IsValid() {
-		// Call ReadDir with an empty string to get all files
+		// Try to scan the root directory first
 		results := readDirMethod.Call([]reflect.Value{reflect.ValueOf(".")})
 		if len(results) == 2 && results[1].IsNil() {
-			// We got a successful result - the first return value should be a directory listing
+			// Process the directory entries
 			dirEntries := results[0].Interface()
-
-			// Convert the result to a slice of fs.DirEntry
 			dirEntriesVal := reflect.ValueOf(dirEntries)
+
 			if dirEntriesVal.Kind() == reflect.Slice && dirEntriesVal.Len() > 0 {
-				// Find the first file
+				// Find the first PHP file, or if no PHP files, the first file
+				var firstFile string
+				var firstPHPFile string
+
 				for i := 0; i < dirEntriesVal.Len(); i++ {
 					entry := dirEntriesVal.Index(i).Interface()
 					entryVal := reflect.ValueOf(entry)
 
-					// Check if it's a file
+					// Get name and check if it's a file
+					nameMethod := entryVal.MethodByName("Name")
 					isFileMethod := entryVal.MethodByName("IsDir")
-					if isFileMethod.IsValid() {
+
+					if nameMethod.IsValid() && isFileMethod.IsValid() {
+						nameResults := nameMethod.Call(nil)
 						isFileResults := isFileMethod.Call(nil)
-						if len(isFileResults) == 1 && !isFileResults[0].Bool() {
-							// It's a file, get its name
-							nameMethod := entryVal.MethodByName("Name")
-							if nameMethod.IsValid() {
-								nameResults := nameMethod.Call(nil)
-								if len(nameResults) == 1 {
-									return nameResults[0].String(), nil
+
+						if len(nameResults) == 1 && len(isFileResults) == 1 {
+							name := nameResults[0].String()
+							isDir := isFileResults[0].Bool()
+
+							if !isDir {
+								// Save the first file we find
+								if firstFile == "" {
+									firstFile = name
+								}
+
+								// If it's a PHP file, that's our preference
+								if strings.HasSuffix(strings.ToLower(name), ".php") {
+									firstPHPFile = name
+									break
 								}
 							}
 						}
+					}
+				}
+
+				// Prefer PHP files, but fall back to any file
+				if firstPHPFile != "" {
+					return firstPHPFile, nil
+				}
+				if firstFile != "" {
+					return firstFile, nil
+				}
+			}
+		}
+
+		// If root directory didn't work, recursively search subdirectories
+		return recursivelyFindPathInEmbedFS(embedFS, val, "")
+	}
+
+	// Check if the Open method exists as a fallback
+	openMethod := val.MethodByName("Open")
+	if !openMethod.IsValid() {
+		return "", fmt.Errorf("not a valid embed.FS (no Open method)")
+	}
+
+	// As a last resort, try some common filenames
+	commonFiles := []string{"index.php", "main.php", "app.php"}
+
+	// Get type name for a hint
+	typeName := reflect.TypeOf(embedFS).String()
+	if strings.Contains(typeName, ".") {
+		parts := strings.Split(typeName, ".")
+		if len(parts) > 0 {
+			baseName := parts[len(parts)-1]
+			baseName = strings.TrimSuffix(baseName, "FS")
+			baseName = strings.TrimSuffix(baseName, "Fs")
+			if baseName != "" {
+				commonFiles = append([]string{baseName + ".php"}, commonFiles...)
+			}
+		}
+	}
+
+	// Try common filenames
+	for _, path := range commonFiles {
+		results := openMethod.Call([]reflect.Value{reflect.ValueOf(path)})
+		if len(results) == 2 && results[1].IsNil() {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("couldn't find a file in the embed.FS automatically")
+}
+
+// recursivelyFindPathInEmbedFS recursively searches for files in subdirectories
+func recursivelyFindPathInEmbedFS(embedFS any, val reflect.Value, prefix string) (string, error) {
+	readDirMethod := val.MethodByName("ReadDir")
+	if !readDirMethod.IsValid() {
+		return "", fmt.Errorf("invalid embed.FS")
+	}
+
+	results := readDirMethod.Call([]reflect.Value{reflect.ValueOf(prefix)})
+	if len(results) != 2 || !results[1].IsNil() {
+		return "", fmt.Errorf("failed to read directory: %s", prefix)
+	}
+
+	dirEntries := results[0].Interface()
+	dirEntriesVal := reflect.ValueOf(dirEntries)
+
+	if dirEntriesVal.Kind() != reflect.Slice {
+		return "", fmt.Errorf("invalid directory entries")
+	}
+
+	// First look for PHP files
+	for i := 0; i < dirEntriesVal.Len(); i++ {
+		entry := dirEntriesVal.Index(i).Interface()
+		entryVal := reflect.ValueOf(entry)
+
+		nameMethod := entryVal.MethodByName("Name")
+		isFileMethod := entryVal.MethodByName("IsDir")
+
+		if nameMethod.IsValid() && isFileMethod.IsValid() {
+			nameResults := nameMethod.Call(nil)
+			isFileResults := isFileMethod.Call(nil)
+
+			if len(nameResults) == 1 && len(isFileResults) == 1 {
+				name := nameResults[0].String()
+				isDir := isFileResults[0].Bool()
+
+				path := name
+				if prefix != "" {
+					path = prefix + "/" + name
+				}
+
+				if !isDir && strings.HasSuffix(strings.ToLower(name), ".php") {
+					return path, nil
+				}
+			}
+		}
+	}
+
+	// Then check subdirectories
+	for i := 0; i < dirEntriesVal.Len(); i++ {
+		entry := dirEntriesVal.Index(i).Interface()
+		entryVal := reflect.ValueOf(entry)
+
+		nameMethod := entryVal.MethodByName("Name")
+		isFileMethod := entryVal.MethodByName("IsDir")
+
+		if nameMethod.IsValid() && isFileMethod.IsValid() {
+			nameResults := nameMethod.Call(nil)
+			isFileResults := isFileMethod.Call(nil)
+
+			if len(nameResults) == 1 && len(isFileResults) == 1 {
+				name := nameResults[0].String()
+				isDir := isFileResults[0].Bool()
+
+				if isDir {
+					subdir := name
+					if prefix != "" {
+						subdir = prefix + "/" + name
+					}
+
+					if path, err := recursivelyFindPathInEmbedFS(embedFS, val, subdir); err == nil {
+						return path, nil
 					}
 				}
 			}
 		}
 	}
 
-	// If ReadDir didn't work or didn't find anything, try a more general approach
-	// This is trickier because embed.FS doesn't expose an API to list all files
+	// If no PHP files, return the first file found
+	for i := 0; i < dirEntriesVal.Len(); i++ {
+		entry := dirEntriesVal.Index(i).Interface()
+		entryVal := reflect.ValueOf(entry)
 
-	// Check if Open method exists (should be there for embed.FS)
-	openMethod := val.MethodByName("Open")
-	if !openMethod.IsValid() {
-		return "", fmt.Errorf("not a valid embed.FS (no Open method)")
-	}
+		nameMethod := entryVal.MethodByName("Name")
+		isFileMethod := entryVal.MethodByName("IsDir")
 
-	// Try a few common patterns for single-file embeds
-	possiblePaths := []string{
-		// For //go:embed somefile.php
-		"somefile.php",
-		// For //go:embed folder/file.php
-		"file.php",
-		// For //go:embed dirpath
-		"index.php",
-		"main.php",
-		"app.php",
-	}
+		if nameMethod.IsValid() && isFileMethod.IsValid() {
+			nameResults := nameMethod.Call(nil)
+			isFileResults := isFileMethod.Call(nil)
 
-	// Also try to get the type name and use it as a hint
-	typeName := reflect.TypeOf(embedFS).String()
-	if strings.Contains(typeName, ".") {
-		parts := strings.Split(typeName, ".")
-		if len(parts) > 0 {
-			baseName := parts[len(parts)-1]
-			// Clean up the name if it has "FS" suffix
-			baseName = strings.TrimSuffix(baseName, "FS")
-			baseName = strings.TrimSuffix(baseName, "Fs")
+			if len(nameResults) == 1 && len(isFileResults) == 1 {
+				name := nameResults[0].String()
+				isDir := isFileResults[0].Bool()
 
-			// If there's something left, use it as a possible filename
-			if baseName != "" {
-				possiblePaths = append([]string{baseName + ".php"}, possiblePaths...)
+				path := name
+				if prefix != "" {
+					path = prefix + "/" + name
+				}
+
+				if !isDir {
+					return path, nil
+				}
 			}
-		}
-	}
-
-	// Try each possible path
-	for _, path := range possiblePaths {
-		results := openMethod.Call([]reflect.Value{reflect.ValueOf(path)})
-		if len(results) == 2 && results[1].IsNil() {
-			// Found a file at this path
-			return path, nil
 		}
 	}
 
@@ -550,7 +602,7 @@ func (s *Server) AddEmbeddedFile(virtualPath string, embedFS any, options ...Emb
 		}
 
 		// Now register both the full path (.php) and the shortened version (without .php)
-		s.RegisterEndpoint(virtualPath, targetPath)
+		s.HandlePHP(virtualPath, targetPath)
 
 		// Also register the clean version (without .php extension)
 		endpointPath := strings.TrimSuffix(virtualPath, ".php")
@@ -560,7 +612,7 @@ func (s *Server) AddEmbeddedFile(virtualPath string, embedFS any, options ...Emb
 
 		// Only register clean version if it's different from the original path
 		if endpointPath != virtualPath {
-			s.RegisterEndpoint(endpointPath, targetPath)
+			s.HandlePHP(endpointPath, targetPath)
 			s.logger.Printf("Registered PHP endpoint: %s -> %s", endpointPath, targetPath)
 		}
 	}
@@ -661,7 +713,7 @@ func (s *Server) getFileFromEmbed(requestPath, targetPath string) error {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Initialize if needed
 	if !s.initialized {
-		if err := s.Initialize(); err != nil {
+		if err := s.Initialize(r.Context()); err != nil {
 			s.logger.Printf("Error initializing server: %v", err)
 			http.Error(w, "Server initialization error", http.StatusInternalServerError)
 			return
@@ -901,29 +953,29 @@ func (s *Server) servePHPFileWithPathParams(urlPath string, sourcePath string, p
 	}
 }
 
-// RemoveEndpoint removes a registered endpoint
-func (s *Server) RemoveEndpoint(urlPath string) {
-	if !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
+// RemoveHandler removes a registered PHP handler
+func (s *Server) RemoveHandler(pattern string) {
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
 	}
 
-	delete(s.endpoints, urlPath)
-	s.logger.Printf("Removed endpoint: %s", urlPath)
+	delete(s.endpoints, pattern)
+	s.logger.Printf("Removed PHP handler: %s", pattern)
 }
 
-// RemoveCustomHandler removes a registered custom handler
-func (s *Server) RemoveCustomHandler(urlPath string) {
-	if !strings.HasPrefix(urlPath, "/") {
-		urlPath = "/" + urlPath
+// RemoveHandleFunc removes a registered custom handler function
+func (s *Server) RemoveHandleFunc(pattern string) {
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
 	}
 
-	delete(s.customHandlers, urlPath)
-	s.logger.Printf("Removed custom handler: %s", urlPath)
+	delete(s.customHandlers, pattern)
+	s.logger.Printf("Removed handler function: %s", pattern)
 }
 
 // ListenAndServe starts the HTTP server
 func (s *Server) ListenAndServe(addr string) error {
-	if err := s.Initialize(); err != nil {
+	if err := s.Initialize(context.Background()); err != nil {
 		return fmt.Errorf("error initializing server: %w", err)
 	}
 
@@ -952,14 +1004,32 @@ func (s *Server) AsMiddleware(next http.Handler) http.Handler {
 		_, registered := s.endpoints[r.URL.Path]
 
 		// Static file check
-		staticPath := filepath.Join(s.sourceDir, strings.TrimPrefix(r.URL.Path, "/"))
-		staticExists := false
-		if _, err := os.Stat(staticPath); err == nil {
-			staticExists = true
+		relPath := strings.TrimPrefix(r.URL.Path, "/")
+		staticPath := filepath.Join(s.sourceDir, relPath)
+
+		// PHP file check (for both static files and directories with index.php)
+		phpExists := false
+
+		// Check if the path is a PHP file
+		if strings.HasSuffix(staticPath, ".php") {
+			if _, err := os.Stat(staticPath); err == nil {
+				phpExists = true
+			}
+		} else {
+			// Check if it's a directory with an index.php
+			if stat, err := os.Stat(staticPath); err == nil && stat.IsDir() {
+				indexPath := filepath.Join(staticPath, "index.php")
+				if _, err := os.Stat(indexPath); err == nil {
+					phpExists = true
+				}
+			} else if err == nil && strings.HasSuffix(staticPath, ".php") {
+				// It's a PHP file
+				phpExists = true
+			}
 		}
 
-		// If it's registered or exists as a static file, handle it with the PHP server
-		if registered || staticExists {
+		// If it's registered or exists as a PHP file, handle it with the PHP server
+		if registered || phpExists {
 			s.ServeHTTP(w, r)
 			return
 		}
@@ -973,8 +1043,8 @@ func (s *Server) AsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// GetSourceDir returns the source directory path
-func (s *Server) GetSourceDir() string {
+// SourceDir returns the source directory path
+func (s *Server) SourceDir() string {
 	return s.sourceDir
 }
 
@@ -1024,29 +1094,29 @@ func (s *Server) AddPHPFile(urlPath string, phpContent []byte, options ...PHPFil
 		return ""
 	}
 
-	if opts.RegisterEndpoints {
+	if opts.HandleEndpoints {
 		// Register the URL path (possibly with .php)
-		s.RegisterEndpoint(urlPath, targetPath)
+		s.HandlePHP(urlPath, targetPath)
 
 		// Also register the clean version (without .php extension) if requested
-		if opts.RegisterCleanPath && strings.HasSuffix(urlPath, ".php") {
+		if opts.HandleCleanPath && strings.HasSuffix(urlPath, ".php") {
 			cleanPath := strings.TrimSuffix(urlPath, ".php")
 			if cleanPath != urlPath && cleanPath != "" {
-				s.RegisterEndpoint(cleanPath, targetPath)
+				s.HandlePHP(cleanPath, targetPath)
 			}
 		}
 
 		// Register special case for "index.php" at root if requested
-		if opts.RegisterRoot &&
+		if opts.HandleRoot &&
 			(urlPath == "/index.php" || strings.HasSuffix(urlPath, "/index.php")) {
 			// Extract the directory part from the urlPath
 			dir := filepath.Dir(urlPath)
 			if dir == "/" {
 				// Root index.php
-				s.RegisterEndpoint("/", targetPath)
+				s.HandlePHP("/", targetPath)
 			} else {
 				// Directory index.php (e.g., /foo/index.php -> /foo/)
-				s.RegisterEndpoint(dir, targetPath)
+				s.HandlePHP(dir, targetPath)
 			}
 		}
 	}
@@ -1298,9 +1368,9 @@ func (c *EnvironmentCache) Cleanup() {
 	c.logger.Printf("Cleaned up all environments")
 }
 
-// RegisterEndpointWithMethod maps a URL path with specific HTTP method to a PHP file
-// Example: server.RegisterEndpointWithMethod("GET /api/users/{id}", "api/user_get.php")
-func (s *Server) RegisterEndpointWithMethod(pattern string, phpFilePath string) {
+// HandleWithMethod maps a URL path with specific HTTP method to a PHP file
+// Example: server.HandleWithMethod("GET /api/users/{id}", "api/user_get.php")
+func (s *Server) HandleWithMethod(pattern string, phpFilePath string) {
 	// Extract method and path from pattern
 	parts := strings.SplitN(pattern, " ", 2)
 	if len(parts) != 2 {
@@ -1322,7 +1392,7 @@ func (s *Server) RegisterEndpointWithMethod(pattern string, phpFilePath string) 
 	}
 
 	// Create a special handler that checks the HTTP method before processing
-	s.RegisterCustomHandler(path, func(w http.ResponseWriter, r *http.Request) {
+	s.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		// Check if the HTTP method matches
 		if r.Method != method {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1356,19 +1426,19 @@ func (s *Server) RegisterEndpointWithMethod(pattern string, phpFilePath string) 
 	s.logger.Printf("Registered %s endpoint: %s -> %s", method, path, phpFilePath)
 }
 
-// RegisterPHPEndpoint is a flexible endpoint registration function that supports multiple formats:
-// 1. Classic style: RegisterPHPEndpoint("/users", "users.php")
-// 2. Method-specific: RegisterPHPEndpoint("GET /users", "users_get.php")
-// 3. With parameters: RegisterPHPEndpoint("GET /users/{id}", "user_detail.php")
-func (s *Server) RegisterPHPEndpoint(pattern string, phpFilePath string) {
+// Handle is a flexible handler registration function that supports multiple formats:
+// 1. Classic style: Handle("/users", "users.php")
+// 2. Method-specific: Handle("GET /users", "users_get.php")
+// 3. With parameters: Handle("GET /users/{id}", "user_detail.php")
+func (s *Server) Handle(pattern string, phpFilePath string) {
 	// Check if this is a method-specific pattern (contains a space)
 	if strings.Contains(pattern, " ") {
-		s.RegisterEndpointWithMethod(pattern, phpFilePath)
+		s.HandleWithMethod(pattern, phpFilePath)
 		return
 	}
 
 	// Otherwise, register as a standard endpoint (works with all methods)
-	s.RegisterEndpoint(pattern, phpFilePath)
+	s.HandlePHP(pattern, phpFilePath)
 }
 
 // CreateMethodRouter creates a router that supports both standard HandleFunc
@@ -1459,7 +1529,7 @@ func (rb *RouteBuilder) registerPatternHandler(method string, pattern string, ha
 	switch h := handler.(type) {
 	case string:
 		// String is interpreted as a PHP file path
-		rb.server.RegisterPHPEndpoint(method+" "+pattern, h)
+		rb.server.Handle(method+" "+pattern, h)
 	case http.HandlerFunc:
 		// Go handler function
 		rb.mux.HandleFunc(method+" "+pattern, h)
@@ -1469,4 +1539,67 @@ func (rb *RouteBuilder) registerPatternHandler(method string, pattern string, ha
 	default:
 		rb.server.logger.Printf("Unsupported handler type for %s %s: %T", method, pattern, handler)
 	}
+}
+
+// Option is a function that configures a Server
+type Option func(*Server)
+
+// WithSourceDir sets the source directory for PHP files
+func WithSourceDir(dir string) Option {
+	return func(s *Server) {
+		s.options.SourceDir = dir
+	}
+}
+
+// WithDevelopmentMode enables immediate file change detection and disables caching
+func WithDevelopmentMode(enabled bool) Option {
+	return func(s *Server) {
+		s.options.DevelopmentMode = enabled
+	}
+}
+
+// WithCheckInterval sets how often to check for file changes in production mode
+func WithCheckInterval(interval time.Duration) Option {
+	return func(s *Server) {
+		s.options.CheckInterval = interval
+	}
+}
+
+// WithCacheDuration sets browser cache duration in production mode
+func WithCacheDuration(duration time.Duration) Option {
+	return func(s *Server) {
+		s.options.CacheDuration = duration
+	}
+}
+
+// WithLogger sets a custom logger
+func WithLogger(logger *log.Logger) Option {
+	return func(s *Server) {
+		s.options.Logger = logger
+		s.logger = logger
+	}
+}
+
+// HandlePHP maps a URL pattern to a PHP file
+func (s *Server) HandlePHP(pattern string, phpFilePath string) {
+	// Ensure URL path starts with a slash
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
+	}
+
+	// If the PHP file is not an absolute path, make it relative to source dir
+	if !filepath.IsAbs(phpFilePath) {
+		phpFilePath = filepath.Join(s.sourceDir, phpFilePath)
+	}
+
+	// Store the mapping
+	s.endpoints[pattern] = phpFilePath
+
+	// Pre-create the environment for this endpoint
+	_, err := s.envCache.GetEnvironment(pattern, phpFilePath)
+	if err != nil {
+		s.logger.Printf("Warning: Failed to pre-create environment for %s: %v", pattern, err)
+	}
+
+	s.logger.Printf("Registered PHP handler: %s -> %s", pattern, phpFilePath)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -34,19 +35,18 @@ func main() {
 	log.Printf("Using web directory: %s", webDir)
 	log.Printf("Using static directory: %s", staticDir)
 
-	// Setup options with the source directory
-	options := gophp.StaticHandlerOptions(webDir)
-	options.DevelopmentMode = !*prodMode
-
-	// Create server instance
-	server, err := gophp.NewServer(options)
+	// Create server instance with functional options
+	server, err := gophp.NewServer(
+		gophp.WithSourceDir(webDir),
+		gophp.WithDevelopmentMode(!*prodMode),
+	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
 	defer server.Shutdown()
 
 	// Initialize server
-	if err := server.Initialize(); err != nil {
+	if err := server.Initialize(context.Background()); err != nil {
 		log.Fatalf("Error initializing server: %v", err)
 	}
 
@@ -64,8 +64,8 @@ func main() {
 	})
 
 	// Register PHP endpoints directly with the server
-	server.RegisterEndpoint("/api/user", "api/user.php")
-	server.RegisterEndpoint("/api/items", "api/items.php")
+	server.HandlePHP("/api/user", "api/user.php")
+	server.HandlePHP("/api/items", "api/items.php")
 
 	// Handle PHP content under /php/ path
 	mux.Handle("/php/", http.StripPrefix("/php", server))
@@ -87,7 +87,11 @@ func main() {
 		fmt.Fprintf(w, `{"error": "Endpoint not found", "path": "%s", "method": "%s"}`,
 			r.URL.Path, r.Method)
 	}))
+
 	mux.Handle("/api/", apiHandler)
+
+	// Add a root handler using the PHP server directly
+	mux.Handle("/", server)
 
 	// Setup graceful shutdown
 	go func() {

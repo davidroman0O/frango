@@ -156,9 +156,10 @@ func main() {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 
-	// Create server with source directory
-	options := gophp.StaticHandlerOptions(webDir)
-	server, err := gophp.NewServer(options)
+	// Create server with functional options
+	server, err := gophp.NewServer(
+		gophp.WithSourceDir(webDir),
+	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
@@ -190,30 +191,31 @@ This will try multiple search strategies:
 
 ```go
 // Development mode (default)
-options := gophp.DefaultHandlerOptions()
+server, err := gophp.NewServer() // Default is development mode
 
 // Production mode
-options := gophp.DefaultHandlerOptions()
-options.DevelopmentMode = false
-options.CacheDuration = 300  // Cache responses for 5 minutes
+server, err := gophp.NewServer(
+    gophp.WithDevelopmentMode(false),
+    gophp.WithCacheDuration(300), // Cache responses for 5 minutes
+)
 ```
 
 ### Registering Specific Endpoints
 
 ```go
 // Register specific PHP endpoints
-server.RegisterEndpoint("/api/user", "api/user.php")
-server.RegisterEndpoint("/api/items", "api/items.php")
+server.HandlePHP("/api/user", "api/user.php")
+server.HandlePHP("/api/items", "api/items.php")
 
 // Register clean URLs (without .php extension)
-server.RegisterEndpoint("/about", "about.php")
+server.HandlePHP("/about", "about.php")
 
 // Map multiple URLs to the same PHP file
-server.RegisterEndpoint("/", "index.php")
-server.RegisterEndpoint("/home", "index.php")
+server.HandlePHP("/", "index.php")
+server.HandlePHP("/home", "index.php")
 
 // Mix with Go handlers
-server.RegisterCustomHandler("/api/time", myTimeHandler)
+server.HandleFunc("/api/time", myTimeHandler)
 ```
 
 ### Using Method-Based Routing (Go 1.22+)
@@ -223,9 +225,9 @@ server.RegisterCustomHandler("/api/time", myTimeHandler)
 mux := server.CreateMethodRouter()
 
 // Register PHP endpoints with method constraints and path parameters
-server.RegisterPHPEndpoint("GET /users", "users_list.php")
-server.RegisterPHPEndpoint("POST /users", "users_create.php") 
-server.RegisterPHPEndpoint("GET /users/{id}", "user_detail.php")
+server.Handle("GET /users", "users_list.php")
+server.Handle("POST /users", "users_create.php") 
+server.Handle("GET /users/{id}", "user_detail.php")
 
 // Start the server with the router
 http.ListenAndServe(":8082", mux)
@@ -248,8 +250,7 @@ var indexPhp embed.FS
 var userPhp embed.FS
 
 func main() {
-	options := gophp.DefaultHandlerOptions()
-	server, err := gophp.NewServer(options)
+	server, err := gophp.NewServer()
 	defer server.Shutdown()
 
 	// Add PHP files from embed.FS
@@ -257,8 +258,8 @@ func main() {
 	userPath := server.AddPHPFromEmbed("/api/user.php", userPhp, "php/api/user.php")
 	
 	// Register endpoints
-	server.RegisterEndpoint("/", indexPath)
-	server.RegisterEndpoint("/api/user", userPath)
+	server.HandlePHP("/", indexPath)
+	server.HandlePHP("/api/user", userPath)
 	
 	server.ListenAndServe(":8082")
 }

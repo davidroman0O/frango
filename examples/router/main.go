@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -114,19 +115,18 @@ func main() {
 	}
 	log.Printf("Using web directory: %s", webDir)
 
-	// Setup options with the source directory
-	options := gophp.StaticHandlerOptions(webDir)
-	options.DevelopmentMode = !*prodMode
-
-	// Create server instance with the options
-	server, err := gophp.NewServer(options)
+	// Create server instance with functional options
+	server, err := gophp.NewServer(
+		gophp.WithSourceDir(webDir),
+		gophp.WithDevelopmentMode(!*prodMode),
+	)
 	if err != nil {
 		log.Fatalf("Error creating server: %v", err)
 	}
 	defer server.Shutdown()
 
 	// Initialize the server to set up FrankenPHP
-	if err := server.Initialize(); err != nil {
+	if err := server.Initialize(context.Background()); err != nil {
 		log.Fatalf("Error initializing server: %v", err)
 	}
 
@@ -146,10 +146,10 @@ func main() {
 	registerItemEndpoints(mux, memStore)
 
 	// Register PHP endpoints that will communicate with our API
-	server.RegisterPHPEndpoint("/users", "api/users.php")
-	server.RegisterPHPEndpoint("/users/{id}", "api/user.php")
-	server.RegisterPHPEndpoint("/items", "api/items.php")
-	server.RegisterPHPEndpoint("/items/{id}", "api/item.php")
+	server.Handle("/users", "api/users.php")
+	server.Handle("/users/{id}", "api/user.php")
+	server.Handle("/items", "api/items.php")
+	server.Handle("/items/{id}", "api/item.php")
 
 	// Add Go handler for memory store status
 	mux.HandleFunc("GET /api/memory", func(w http.ResponseWriter, r *http.Request) {
