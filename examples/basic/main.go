@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -72,7 +73,7 @@ func main() {
 
 	// Start server (this blocks until the server is stopped)
 	log.Printf("Server starting on port %s", *port)
-	if err := server.ListenAndServe(":" + *port); err != nil {
+	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

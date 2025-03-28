@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	frango "github.com/davidroman0O/frango"
@@ -33,7 +34,7 @@ func main() {
 	log.Println("Open http://localhost:8082/ in your browser")
 
 	// Start serving PHP files
-	if err := server.ListenAndServe(":8082"); err != nil {
+	if err := server.ListenAndServe(context.Background(), ":8082"); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

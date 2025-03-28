@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -44,11 +43,6 @@ func main() {
 		log.Fatalf("Error creating server: %v", err)
 	}
 	defer server.Shutdown()
-
-	// Initialize server
-	if err := server.Initialize(context.Background()); err != nil {
-		log.Fatalf("Error initializing server: %v", err)
-	}
 
 	// Create a standard HTTP mux
 	mux := http.NewServeMux()

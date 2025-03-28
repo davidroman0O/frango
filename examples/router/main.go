@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -124,11 +123,6 @@ func main() {
 		log.Fatalf("Error creating server: %v", err)
 	}
 	defer server.Shutdown()
-
-	// Initialize the server to set up FrankenPHP
-	if err := server.Initialize(context.Background()); err != nil {
-		log.Fatalf("Error initializing server: %v", err)
-	}
 
 	// Create our memory store
 	memStore := NewMemoryStore()

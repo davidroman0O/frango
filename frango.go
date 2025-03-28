@@ -217,8 +217,8 @@ func NewServer(opts ...Option) (*Server, error) {
 	return server, nil
 }
 
-// Initialize initializes the PHP environment with context
-func (s *Server) Initialize(ctx context.Context) error {
+// initialize initializes the PHP environment with context (private method)
+func (s *Server) initialize(ctx context.Context) error {
 	if s.initialized {
 		return nil
 	}
@@ -860,7 +860,7 @@ func (s *Server) getFileFromEmbed(requestPath, targetPath string) error {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Initialize if needed
 	if !s.initialized {
-		if err := s.Initialize(r.Context()); err != nil {
+		if err := s.initialize(r.Context()); err != nil {
 			s.logger.Printf("Error initializing server: %v", err)
 			http.Error(w, "Server initialization error", http.StatusInternalServerError)
 			return
@@ -1121,8 +1121,8 @@ func (s *Server) RemoveHandleFunc(pattern string) {
 }
 
 // ListenAndServe starts the HTTP server
-func (s *Server) ListenAndServe(addr string) error {
-	if err := s.Initialize(context.Background()); err != nil {
+func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
+	if err := s.initialize(ctx); err != nil {
 		return fmt.Errorf("error initializing server: %w", err)
 	}
 
@@ -1135,7 +1135,12 @@ func (s *Server) ListenAndServe(addr string) error {
 		return "PRODUCTION"
 	}())
 
-	return http.ListenAndServe(addr, s)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: s,
+	}
+
+	return server.ListenAndServe()
 }
 
 // WithMiddleware wraps the PHP server with middleware

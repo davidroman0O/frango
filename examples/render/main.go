@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -57,5 +58,7 @@ func main() {
 
 	// Start the server
 	log.Printf("Server started at http://localhost:8082")
-	log.Fatal(http.ListenAndServe(":8082", server))
+	if err := server.ListenAndServe(context.Background(), ":8082"); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
 }

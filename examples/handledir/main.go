@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -65,7 +66,7 @@ func main() {
 	// Start server
 	log.Printf("HandleDir Example running on port %s", *port)
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := server.ListenAndServe(":" + *port); err != nil {
+	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
