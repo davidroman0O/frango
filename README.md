@@ -6,6 +6,8 @@ Frango is a focused, framework-agnostic middleware that integrates PHP into any 
   <img src="./docs/gopher.png" width="400" height="400" alt="frango Logo">
 </p>
 
+> IT IS STILL WORK IN PROGRESS
+
 ## Design Philosophy
 
 Frango is built as a **pure middleware** with no server abstractions. This design:
