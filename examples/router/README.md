@@ -22,6 +22,9 @@ web/
   │   └── item.php        # Item detail page
 ```
 
+embedded-php/
+  └── dashboard.php       # Embedded dashboard template
+
 ## How It Works
 
 The example uses Go 1.22's pattern-based routing to handle different HTTP methods and URL patterns:
@@ -30,6 +33,7 @@ The example uses Go 1.22's pattern-based routing to handle different HTTP method
 2. Registers Go API endpoints for CRUD operations
 3. Registers PHP files for the UI components
 4. Uses path parameters for dynamic routes
+5. Demonstrates embedded PHP templates with dynamic data
 
 ## Running the Example
 
@@ -41,6 +45,38 @@ go run -tags=nowatcher ./examples/router
 Then open your browser to `http://localhost:8082/`
 
 ## Key Routing Concepts
+
+### Embedded PHP Templates
+
+The example also demonstrates how to embed PHP templates directly in your Go binary and serve them with dynamic data:
+
+```go
+// Embed the PHP dashboard template
+//go:embed embedded-php/dashboard.php
+var dashboardTemplate embed.FS
+
+// In main function:
+// Create a render function that provides dynamic data
+dashboardRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+    return map[string]interface{}{
+        "title": "Dashboard",
+        "user": map[string]interface{}{
+            "name": "Admin User",
+            "role": "Administrator",
+        },
+        "items": items,  // data from memory store
+        "stats": stats,  // calculated statistics
+    }
+}
+
+// Register the embedded template with the new intuitive method
+php.HandleEmbedWithRender("/dashboard", dashboardTemplate, "embedded-php/dashboard.php", dashboardRenderFn)
+
+// Make sure the router knows about this path
+combinedMux.Handle("/dashboard", phpMux)
+```
+
+This pattern allows you to include PHP templates directly in your binary while still providing them with dynamic data from your Go application.
 
 ### Separate PHP and Go Routes
 

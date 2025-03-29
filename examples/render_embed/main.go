@@ -41,11 +41,7 @@ func main() {
 	}
 	defer php.Shutdown()
 
-	// Register the dashboard template with embed.FS
 	log.Printf("Embedding dashboard template from %s", "php/dashboard.php")
-
-	// First add the file from embed
-	targetPath := php.AddFromEmbed("/dashboard", dashboardTemplate, "php/dashboard.php")
 
 	// Create the render function that will be used for both routes
 	renderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
@@ -107,12 +103,8 @@ func main() {
 		return data
 	}
 
-	// Register the render handler for the dashboard
-	php.SetRenderHandler("/dashboard", renderFn)
-
 	// Also make it accessible at the root for convenience
-	php.HandlePHP("/", targetPath)
-	php.SetRenderHandler("/", renderFn)
+	php.HandleEmbedWithRender("/", dashboardTemplate, "php/dashboard.php", renderFn)
 
 	// Setup graceful shutdown
 	go func() {

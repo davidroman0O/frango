@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -16,6 +17,11 @@ import (
 
 	frango "github.com/davidroman0O/frango"
 )
+
+// Embed the PHP dashboard template
+//
+//go:embed embedded-php/dashboard.php
+var dashboardTemplate embed.FS
 
 // User represents a user in the system
 type User struct {
@@ -212,6 +218,74 @@ func main() {
 
 	// Register the Go API routes
 	combinedMux.Handle("/api/", mux)
+
+	// Setup embedded dashboard with dynamic data
+	dashboardRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+		log.Println("Dashboard render function called - generating data")
+
+		// Get data from the memory store
+		pageViews := memStore.GetValue("page_views")
+		if pageViews == nil {
+			pageViews = 0
+		}
+
+		// Extract users from memory store
+		var users []map[string]interface{}
+		if usersVal := memStore.GetValue("users"); usersVal != nil {
+			if usersSlice, ok := usersVal.([]map[string]interface{}); ok {
+				users = usersSlice
+			}
+		}
+
+		// Extract items from memory store
+		var items []map[string]interface{}
+		if itemsVal := memStore.GetValue("items"); itemsVal != nil {
+			if itemsSlice, ok := itemsVal.([]map[string]interface{}); ok {
+				items = itemsSlice
+			}
+		}
+
+		// Count active users (simulate with a random percentage of total)
+		totalUsers := len(users)
+		activeUsers := int(float64(totalUsers) * 0.7) // 70% active rate
+		if activeUsers < 1 && totalUsers > 0 {
+			activeUsers = 1
+		}
+
+		// Create stats
+		stats := map[string]interface{}{
+			"total_users":     totalUsers,
+			"active_users":    activeUsers,
+			"total_products":  len(items),
+			"revenue":         12568.99, // Simulated revenue
+			"conversion_rate": "3.2%",   // Simulated conversion rate
+		}
+
+		// Create data to pass to the PHP template
+		data := map[string]interface{}{
+			"title": "Router Example - Embedded Dashboard",
+			"user": map[string]interface{}{
+				"name":  "Admin User",
+				"email": "admin@example.com",
+				"role":  "Administrator",
+			},
+			"items": items,
+			"stats": stats,
+			"debug_info": map[string]interface{}{
+				"timestamp":   time.Now().Format(time.RFC3339),
+				"page_views":  pageViews,
+				"memory_keys": len(memStore.GetAllValues()),
+			},
+		}
+
+		return data
+	}
+
+	// Register the embedded dashboard with its render function using the new intuitive method
+	php.HandleEmbedWithRender("/dashboard", dashboardTemplate, "embedded-php/dashboard.php", dashboardRenderFn)
+
+	// Update combined router to handle the dashboard route
+	combinedMux.Handle("/dashboard", phpMux)
 
 	// Setup graceful shutdown
 	go func() {

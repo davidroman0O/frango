@@ -53,11 +53,8 @@ func main() {
 	}
 	defer php.Shutdown()
 
-	// Add the embedded dashboard template
-	targetPath := php.AddFromEmbed("/dashboard", dashboardTemplate, "php/dashboard.php")
-	
-	// Set up a render function to provide dynamic data
-	php.SetRenderHandler("/dashboard", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+	// Create render function to provide dynamic data
+	renderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
 		// Return variables to inject into the PHP template
 		return map[string]interface{}{
 			"title": "Dashboard - " + time.Now().Format(time.RFC1123),
@@ -79,11 +76,13 @@ func main() {
 				},
 			},
 		}
-	})
+	}
+
+	// SIMPLIFIED VERSION - Use the intuitive HandleEmbedWithRender method
+	php.HandleEmbedWithRender("/dashboard", dashboardTemplate, "php/dashboard.php", renderFn)
 	
-	// Also make the dashboard available at the root for convenience
-	php.HandlePHP("/", targetPath)
-	php.SetRenderHandler("/", php.SetRenderHandler("/dashboard"))
+	// Also make it available at the root for convenience
+	php.HandleEmbedWithRender("/", dashboardTemplate, "php/dashboard.php", renderFn)
 
 	// Start the server with the PHP middleware
 	log.Println("Server starting on :8082")
@@ -92,6 +91,28 @@ func main() {
 	}
 }
 ```
+
+### Comparison with Old Way
+
+Previously, you had to use multiple method calls for what is conceptually a single operation:
+
+```go
+// OLD WAY - Multiple steps
+// 1. First add the file from embed
+targetPath := php.AddFromEmbed("/dashboard", dashboardTemplate, "php/dashboard.php")
+
+// 2. Then register the render handler separately
+php.SetRenderHandler("/dashboard", renderFn)
+```
+
+The new `HandleEmbedWithRender` method simplifies this common pattern into a single, intuitive call:
+
+```go 
+// NEW WAY - Single intuitive call
+php.HandleEmbedWithRender("/dashboard", dashboardTemplate, "php/dashboard.php", renderFn)
+```
+
+This significantly improves code readability and maintenance.
 
 In PHP, the variables are accessed using helper functions:
 

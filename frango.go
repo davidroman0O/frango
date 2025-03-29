@@ -1158,3 +1158,21 @@ func (m *Middleware) SetRenderHandler(pattern string, renderFn RenderData) {
 	renderHandlersMutex.Unlock()
 	m.logger.Printf("Registered render handler for path: %s", pattern)
 }
+
+// HandleEmbedWithRender combines adding an embedded PHP file and registering a render function in a single call
+func (m *Middleware) HandleEmbedWithRender(
+	urlPath string,
+	embedFS embed.FS,
+	embedPath string,
+	renderFn RenderData,
+) string {
+	// Add the file from embed
+	targetPath := m.AddFromEmbed(urlPath, embedFS, embedPath)
+
+	// Set the render handler for the path
+	m.SetRenderHandler(urlPath, renderFn)
+
+	m.logger.Printf("Registered embedded PHP file with render handler at %s", urlPath)
+
+	return targetPath
+}
