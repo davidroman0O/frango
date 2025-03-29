@@ -1,0 +1,122 @@
+// Example demonstrating the HandleRenderEmbed function
+package main
+
+import (
+	"context"
+	"embed"
+	"encoding/json"
+	"flag"
+	"log"
+	"math/rand"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	frango "github.com/davidroman0O/frango"
+)
+
+// Embed the PHP files directly
+//
+//go:embed php/dashboard.php
+var dashboardTemplate embed.FS
+
+func main() {
+	// Seed the random number generator
+	rand.Seed(time.Now().UnixNano())
+
+	// Parse command line flags
+	port := flag.String("port", "8082", "Port to listen on")
+	prodMode := flag.Bool("prod", false, "Enable production mode")
+	flag.Parse()
+
+	log.Printf("Starting server with development mode: %v", !*prodMode)
+
+	// Create server
+	server, err := frango.NewServer(
+		frango.WithDevelopmentMode(!*prodMode),
+	)
+	if err != nil {
+		log.Fatalf("Error creating server: %v", err)
+	}
+	defer server.Shutdown()
+
+	// Register the dashboard template with HandleRenderEmbed
+	log.Printf("Embedding dashboard template from %s", "php/dashboard.php")
+	server.HandleRenderEmbed("/", dashboardTemplate, "php/dashboard.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+		log.Println("Render function called - generating data")
+
+		// Generate some sample data
+		items := []map[string]interface{}{
+			{
+				"id":          1,
+				"name":        "Widget Pro",
+				"description": "The best widget ever made",
+				"price":       19.99,
+			},
+			{
+				"id":          2,
+				"name":        "Super Gadget",
+				"description": "A revolutionary gadget",
+				"price":       29.99,
+			},
+			{
+				"id":          3,
+				"name":        "Amazing Product",
+				"description": "You won't believe how amazing it is",
+				"price":       39.99,
+			},
+		}
+
+		stats := map[string]interface{}{
+			"total_users":     1250,
+			"active_users":    867,
+			"total_products":  342,
+			"revenue":         12568.99,
+			"conversion_rate": "3.2%",
+		}
+
+		// Create the data to pass to PHP (with debug output just in case)
+		data := map[string]interface{}{
+			"title": "Dashboard - Embedded PHP Rendering",
+			"user": map[string]interface{}{
+				"name":  "John Doe",
+				"email": "john@example.com",
+				"role":  "Administrator",
+			},
+			"items": items,
+			"stats": stats,
+			// Add debug info directly
+			"debug_info": map[string]interface{}{
+				"timestamp":  time.Now().Format(time.RFC3339),
+				"values_set": true,
+			},
+		}
+
+		// Log each value for debugging
+		for k, v := range data {
+			jsonBytes, _ := json.Marshal(v)
+			log.Printf("KEY %s = %s", k, string(jsonBytes))
+		}
+
+		return data
+	})
+
+	// Setup graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		log.Println("Shutting down server...")
+		server.Shutdown()
+		os.Exit(0)
+	}()
+
+	// Start the server
+	log.Printf("Render Embed Example running on http://localhost:%s", *port)
+	log.Printf("Open http://localhost:%s/ in your browser", *port)
+	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
