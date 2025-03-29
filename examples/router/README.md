@@ -1,29 +1,35 @@
-# Go-PHP Router Example
+# Router Integration Example
 
-This example demonstrates how to use Go-PHP with Go 1.22's new method-based routing pattern.
+This example demonstrates how to use Frango with Go's HTTP router to create a full-featured web application combining both PHP and Go handlers.
 
 ## Features
 
-- Method-based routing (`GET`, `POST`, `PUT`, `DELETE`)
-- Path parameters (`/users/{id}`)
-- Mix of PHP endpoints and native Go handlers
-- Interactive web UI to test all endpoints
+- Method-based routing (GET, POST, PUT, DELETE)
+- Path parameters in routes
+- In-memory data store for testing
+- Mixing Go API handlers with PHP templates
+- Different routing patterns for different endpoints
 
-## File Structure
+## Directory Structure
 
 ```
-router/
-├── main.go              // The Go server implementation with method-based routes
-├── web/                 // PHP web directory
-│   ├── index.php        // Interactive UI for testing the API
-│   └── api/             // API endpoints
-│       ├── users_list.php       // GET /users
-│       ├── users_create.php     // POST /users
-│       ├── user_detail.php      // GET /users/{id}
-│       ├── user_update.php      // PUT /users/{id}
-│       ├── user_delete.php      // DELETE /users/{id}
-│       └── items.php            // Standard endpoint for all methods
+web/
+  ├── index.php           # Main dashboard
+  ├── api/
+  │   ├── users.php       # Users list page
+  │   ├── user.php        # User detail page
+  │   ├── items.php       # Items list page
+  │   └── item.php        # Item detail page
 ```
+
+## How It Works
+
+The example uses Go 1.22's pattern-based routing to handle different HTTP methods and URL patterns:
+
+1. Creates an in-memory store for sample data
+2. Registers Go API endpoints for CRUD operations
+3. Registers PHP files for the UI components
+4. Uses path parameters for dynamic routes
 
 ## Running the Example
 
@@ -32,34 +38,42 @@ router/
 go run -tags=nowatcher ./examples/router
 ```
 
-Then visit http://localhost:8082 in your browser.
+Then open your browser to `http://localhost:8082/`
 
-> **Important**: The `nowatcher` build tag is required to make this example work properly.
+## Key Routing Concepts
 
-## Key Code Patterns
-
-### Go Method-Based Routing (Go 1.22+)
+### Separate PHP and Go Routes
 
 ```go
-// Create a method-based router
-mux := server.CreateMethodRouter()
+// Create separate muxes for PHP and Go
+phpMux := http.NewServeMux()
+apiMux := http.NewServeMux()
 
-// Register PHP endpoints with method constraints
-server.RegisterPHPEndpoint("GET /users", "api/users_list.php")
-server.RegisterPHPEndpoint("GET /users/{id}", "api/user_detail.php")
-
-// Add native Go handlers with path parameters
-mux.HandleFunc("GET /api/user/{id}/posts", func(w http.ResponseWriter, r *http.Request) {
-    userID := r.PathValue("id") // Access path parameters
-    // ...
+// Register PHP paths to be handled by the PHP middleware
+phpMux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+    php.ServeHTTP(w, r)
 })
+phpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    php.ServeHTTP(w, r)
+})
+
+// Register API paths with the Go handlers
+apiMux.HandleFunc("GET /api/users", getUsersHandler)
+apiMux.HandleFunc("POST /api/users", createUserHandler)
+apiMux.HandleFunc("GET /api/users/{id}", getUserHandler)
+
+// Register the PHP files with the middleware
+php.HandlePHP("/users", "api/users.php")
+php.HandlePHP("/users/{id}", "api/user.php")
+php.HandlePHP("/", "index.php")
+
+// Create a parent router that combines both
+mainMux := http.NewServeMux()
+mainMux.Handle("/api/", apiMux)
+mainMux.Handle("/", phpMux)
+
+// Start the server with the combined router
+http.ListenAndServe(":8082", mainMux)
 ```
 
-### Accessing Path Parameters in PHP
-
-```php
-// Extract user ID from the URL path
-$path = $_SERVER['REQUEST_URI'];
-$pathParts = explode('/', trim($path, '/'));
-$userId = $pathParts[count($pathParts) - 1]; // Get the last part
-``` 
+This pattern allows for clean separation of PHP and Go handlers while still having them work together in a unified application. 

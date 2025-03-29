@@ -1,33 +1,46 @@
 # HandleDir Example
 
-This example demonstrates how to use the `HandleDir` function in Go-PHP to automatically register PHP files in a directory structure.
+This example demonstrates how to use Frango's `HandleDir` function to register all PHP files in a directory for serving.
 
 ## Features
 
-- Automatically registers all PHP files under a URL prefix
-- Creates clean URLs without .php extensions
-- Works with nested directories
-- Supports both relative and absolute paths
+- Automatically mapping all PHP files in a directory
+- Serving an entire directory structure with one command
+- Preserving the directory hierarchy in URL paths
+- Automatically creating clean URLs for all files
 
 ## Directory Structure
 
 ```
 web/
-  ├── index.php           # Main page with links
-  ├── pages/              # Pages directory
-  │   ├── about.php       # About page
-  │   └── contact.php     # Contact page
-  └── api/                # API directory
-      ├── users.php       # Users API endpoint
-      └── items.php       # Items API endpoint
+  ├── index.php     # Root index file
+  ├── about.php     # About page
+  ├── contact.php   # Contact page
+  ├── blog/         # Blog directory
+  │   ├── index.php # Blog index
+  │   ├── post1.php # Individual blog post
+  │   └── post2.php # Another blog post
+  └── docs/         # Documentation directory
+      ├── index.php # Docs index
+      ├── guide.php # Guide page
+      └── api.php   # API documentation
 ```
 
 ## How it Works
 
-1. The `HandleDir` function scans a directory for PHP files
-2. It automatically registers each file under the specified URL prefix
-3. All PHP files are accessible with or without the `.php` extension
-4. The original directory structure is preserved in the URL paths
+The example registers all PHP files in the `web` directory and makes them available at corresponding URLs:
+
+- `web/index.php` → `/index.php` or `/`
+- `web/about.php` → `/about.php` or `/about`
+- `web/blog/index.php` → `/blog/index.php` or `/blog/`
+- `web/blog/post1.php` → `/blog/post1.php` or `/blog/post1`
+
+The `HandleDir` function automatically:
+
+1. Recursively finds all PHP files in the specified directory
+2. Registers them with appropriate URL patterns
+3. Creates clean URLs without the .php extension
+4. Sets up directory indexes using index.php files
 
 ## Running the Example
 
@@ -42,18 +55,24 @@ Then open your browser to `http://localhost:8082/`
 
 ## Key Code
 
-The main functionality is provided by the `HandleDir` function:
-
 ```go
-// Register all PHP files in the "pages" directory under the "/pages" URL prefix
-if err := server.HandleDir("/pages", "pages"); err != nil {
-    log.Fatalf("Error registering pages directory: %v", err)
+// Create PHP middleware
+php, err := frango.New(
+    frango.WithSourceDir(webDir),
+    frango.WithDevelopmentMode(true),
+)
+
+// Register the entire web directory at the root
+err = php.HandleDir("/", "")
+if err != nil {
+    log.Fatalf("Error registering directory: %v", err)
 }
 
-// Register all PHP files in the "api" directory under the "/api" URL prefix
-if err := server.HandleDir("/api", "api"); err != nil {
-    log.Fatalf("Error registering API directory: %v", err)
+// Start the server with the PHP middleware
+log.Println("Server starting on :8082")
+if err := http.ListenAndServe(":8082", php); err != nil {
+    log.Fatalf("Server error: %v", err)
 }
 ```
 
-This automatically makes all PHP files in the "pages" and "api" directories available under the "/pages" and "/api" URL prefixes, respectively. 
+This pattern is particularly useful for porting existing PHP applications to Go with minimal changes. 

@@ -1,8 +1,11 @@
 package main
 
 import (
-	"context"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	frango "github.com/davidroman0O/frango"
 )
@@ -14,27 +17,37 @@ func main() {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 
-	// Create server with functional options
-	server, err := frango.NewServer(
+	// Create PHP middleware with functional options
+	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
 	// Register the Redis API endpoint for the REST API
 	// This uses SimpleRedis.php (pure PHP Redis client) for data storage
-	server.HandlePHP("/api/redis", "api.php")
+	php.HandlePHP("/api/redis", "api.php")
 
 	// The root endpoint (/) is automatically handled by index.php
 	// which displays Redis connection status and statistics
 
+	// Setup graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		log.Println("Shutting down server...")
+		php.Shutdown()
+		os.Exit(0)
+	}()
+
+	// Start the HTTP server with PHP middleware as the handler
 	log.Println("Starting Redis example server on :8082")
 	log.Println("Open http://localhost:8082/ in your browser")
 
-	// Start serving PHP files
-	if err := server.ListenAndServe(context.Background(), ":8082"); err != nil {
+	if err := http.ListenAndServe(":8082", php); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

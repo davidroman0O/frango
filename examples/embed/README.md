@@ -1,35 +1,21 @@
-# Embedded PHP Files Example
+# PHP Embedding Example
 
-This example demonstrates how to embed PHP files directly into your Go binary using Go's `embed` package, eliminating the need for separate PHP files at runtime.
+This example demonstrates how to embed PHP files directly into your Go binary, eliminating the need for external PHP files.
 
 ## Features
 
 - Embedding PHP files directly into Go binary
-- No need for external PHP files at runtime
-- Adding embedded PHP files to the server
-- Registering endpoints for embedded files
-- Clean URLs for better user experience
+- No external PHP files needed
+- Same functionality as if serving from disk
+- Mixing embedded PHP with Go handlers
 
 ## How it Works
 
-The example uses Go's `embed` package to include PHP files in the compiled binary:
-
-1. PHP files are embedded using the `//go:embed` directive
-2. `AddPHPFromEmbed` extracts the files to a temporary directory
-3. `HandlePHP` registers URL patterns for the extracted files
-4. Multiple URL patterns can point to the same PHP file
-
-## Directory Structure
-
-```
-embed/
-  ├── main.go           # Go code with embedded PHP files
-  └── php/              # Original PHP files (embedded in binary)
-      ├── index.php     # Main index page
-      └── api/          # API endpoints
-          ├── user.php  # User API
-          └── items.php # Items API
-```
+1. The PHP files are embedded into the Go binary using Go's `embed` package.
+2. When the application starts, it:
+   - Extracts the embedded PHP files to memory
+   - Registers them with the Frango middleware
+   - Serves them like regular PHP files
 
 ## Running the Example
 
@@ -40,31 +26,70 @@ go run -tags=nowatcher ./examples/embed
 
 Then open your browser to `http://localhost:8082/`
 
-> **Important**: The `nowatcher` build tag is required to make this example work properly.
-
 ## Key Code
 
 ```go
-// Embed the PHP files directly
+package main
+
+import (
+	"embed"
+	"log"
+	"net/http"
+	"github.com/davidroman0O/frango"
+)
+
 //go:embed php/index.php
 var indexPhp embed.FS
 
-//go:embed php/api/user.php
-var userPhp embed.FS
+//go:embed php/api/data.php
+var dataPhp embed.FS
 
-//go:embed php/api/items.php
-var itemsPhp embed.FS
+func main() {
+	// Create a new PHP middleware (no source directory needed)
+	php, err := frango.New(
+		frango.WithDevelopmentMode(true),
+	)
+	if err != nil {
+		log.Fatalf("Error creating PHP middleware: %v", err)
+	}
+	defer php.Shutdown()
 
-// Add the PHP files from embedded filesystem - simple and direct
-// Create files without registering endpoints
-indexPath := server.AddPHPFromEmbed("/index.php", indexPhp, "php/index.php")
-userPath := server.AddPHPFromEmbed("/api/user.php", userPhp, "php/api/user.php")
-itemsPath := server.AddPHPFromEmbed("/api/items.php", itemsPhp, "php/api/items.php")
+	// Add the embedded PHP files
+	php.AddFromEmbed("/", indexPhp, "php/index.php")
+	php.AddFromEmbed("/api/data", dataPhp, "php/api/data.php")
 
-// Now explicitly register the endpoints
-server.HandlePHP("/", indexPath)          // Root path
-server.HandlePHP("/index", indexPath)     // Without .php extension
-server.HandlePHP("/index.php", indexPath) // With .php extension
+	// Create a standard HTTP mux for routing
+	mux := http.NewServeMux()
+
+	// Register a Go handler
+	mux.HandleFunc("GET /api/time", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"time": "` + time.Now().Format(time.RFC3339) + `"}`))
+	})
+
+	// Use the PHP middleware for all requests
+	handler := php.Wrap(mux)
+
+	// Start the server
+	log.Println("Server starting on :8082")
+	log.Println("Open http://localhost:8082/ in your browser")
+	if err := http.ListenAndServe(":8082", handler); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}
 ```
 
-This approach allows you to distribute a single binary containing both your Go application and PHP files, making deployment simpler. 
+## Benefits
+
+- **Simplified Deployment**: Package everything in a single binary
+- **Enhanced Security**: No PHP files exposed on disk
+- **Versioning**: PHP code is versioned along with Go code
+- **Simplified Development**: Changes to PHP code are included in Go builds
+
+## Important Note
+
+When embedding PHP files, be aware that:
+
+1. Changes to PHP files require rebuilding the Go binary
+2. Runtime PHP file editing is not possible
+3. The embedding process extracts files to a temporary directory at runtime 

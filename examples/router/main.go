@@ -108,21 +108,21 @@ func main() {
 	flag.Parse()
 
 	// Find the web directory
-	webDir, err := frango.ResolveDirectory("examples/router/web")
+	webDir, err := frango.ResolveDirectory("web")
 	if err != nil {
 		log.Fatalf("Error finding web directory: %v", err)
 	}
 	log.Printf("Using web directory: %s", webDir)
 
-	// Create server instance with functional options
-	server, err := frango.NewServer(
+	// Create middleware instance with functional options
+	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
 	// Create our memory store
 	memStore := NewMemoryStore()
@@ -130,22 +130,16 @@ func main() {
 	// Add sample data to the memory store
 	initializeMemoryStore(memStore)
 
-	// Create a router
-	mux := server.CreateMethodRouter()
+	// Create a standard HTTP mux for routing with method patterns
+	mux := http.NewServeMux()
 
-	// Register API endpoints for users
+	// Register API endpoints for users - pure Go endpoints
 	registerUserEndpoints(mux, memStore)
 
-	// Register API endpoints for items
+	// Register API endpoints for items - pure Go endpoints
 	registerItemEndpoints(mux, memStore)
 
-	// Register PHP endpoints that will communicate with our API
-	server.Handle("/users", "api/users.php")
-	server.Handle("/users/{id}", "api/user.php")
-	server.Handle("/items", "api/items.php")
-	server.Handle("/items/{id}", "api/item.php")
-
-	// Add Go handler for memory store status
+	// Register purely Go handlers for status and memory info
 	mux.HandleFunc("GET /api/memory", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -178,20 +172,61 @@ func main() {
 		fmt.Fprintf(w, `{"status":"ok","time":"%s"}`, time.Now().Format(time.RFC3339))
 	})
 
+	// Create a separate PHP mux
+	phpMux := http.NewServeMux()
+
+	// Register PHP endpoints
+	// These will only be handled by the PHP middleware
+	phpMux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		php.ServeHTTP(w, r)
+	})
+	phpMux.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		php.ServeHTTP(w, r)
+	})
+	phpMux.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
+		php.ServeHTTP(w, r)
+	})
+	phpMux.HandleFunc("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		php.ServeHTTP(w, r)
+	})
+	phpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		php.ServeHTTP(w, r)
+	})
+
+	// Register PHP handler routes
+	php.HandlePHP("/users", "api/users.php")
+	php.HandlePHP("/users/{id}", "api/user.php")
+	php.HandlePHP("/items", "api/items.php")
+	php.HandlePHP("/items/{id}", "api/item.php")
+	php.HandlePHP("/", "index.php")
+
+	// Create a combined router that handles both PHP and Go routes
+	combinedMux := http.NewServeMux()
+
+	// Register the PHP routes
+	combinedMux.Handle("/users", phpMux)
+	combinedMux.Handle("/users/", phpMux)
+	combinedMux.Handle("/items", phpMux)
+	combinedMux.Handle("/items/", phpMux)
+	combinedMux.Handle("/", phpMux)
+
+	// Register the Go API routes
+	combinedMux.Handle("/api/", mux)
+
 	// Setup graceful shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
-	// Start the server with our router
+	// Start the server with our combined router
 	log.Printf("Router Example running on port %s", *port)
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := http.ListenAndServe(":"+*port, mux); err != nil {
+	if err := http.ListenAndServe(":"+*port, combinedMux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

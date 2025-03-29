@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -26,15 +25,15 @@ func main() {
 	}
 	log.Printf("Using web directory: %s", webDir)
 
-	// Create server instance with functional options
-	server, err := frango.NewServer(
+	// Create PHP middleware instance with functional options
+	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
 	// Register specific endpoints with explicit control over URL routing
 	// Format: HandlePHP(pattern, phpFilePath)
@@ -42,24 +41,39 @@ func main() {
 	// - phpFilePath: Path to the PHP file (relative to web directory)
 
 	// Standard endpoints
-	server.HandlePHP("/api/user", "api/user.php")
-	server.HandlePHP("/api/items", "api/items.php")
+	php.HandlePHP("/api/user", "api/user.php")
+	php.HandlePHP("/api/items", "api/items.php")
 
 	// You can map the same PHP file to multiple URL paths
-	server.HandlePHP("/api/users", "api/user.php") // Alias for the same file
+	php.HandlePHP("/api/users", "api/user.php") // Alias for the same file
 
 	// You can register URLs with or without .php extension
-	server.HandlePHP("/about", "about.php")     // Clean URL without .php
-	server.HandlePHP("/about.php", "about.php") // Traditional URL with .php
+	php.HandlePHP("/about", "about.php")     // Clean URL without .php
+	php.HandlePHP("/about.php", "about.php") // Traditional URL with .php
 
 	// Create clean URLs for index pages
-	server.HandlePHP("/", "index.php") // Root maps to index.php
+	php.HandlePHP("/", "index.php") // Root maps to index.php
+
+	// Create a standard HTTP mux for routing
+	mux := http.NewServeMux()
 
 	// Register a custom Go handler
-	server.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"time": "` + time.Now().Format(time.RFC3339) + `"}`))
 	})
+
+	// Use the PHP middleware as the default handler
+	// This routes all requests through PHP middleware, which will handle PHP files
+	// and pass through non-PHP requests
+
+	// Option 1: PHP handles everything first, falls back to mux for Go handlers
+	handler := php.Wrap(mux)
+
+	// Option 2: Use http.ServeMux and mount PHP directly for all paths
+	// Comment out Option 1 and uncomment these lines to use this approach instead
+	// mux.Handle("/", php)
+	// handler := mux
 
 	// Setup graceful shutdown
 	go func() {
@@ -67,13 +81,14 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
-	// Start server (this blocks until the server is stopped)
+	// Start server with our handlers
 	log.Printf("Server starting on port %s", *port)
-	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
+	log.Printf("Open http://localhost:%s/ in your browser", *port)
+	if err := http.ListenAndServe(":"+*port, handler); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

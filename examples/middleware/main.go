@@ -34,15 +34,15 @@ func main() {
 	log.Printf("Using web directory: %s", webDir)
 	log.Printf("Using static directory: %s", staticDir)
 
-	// Create server instance with functional options
-	server, err := frango.NewServer(
+	// Create PHP middleware instance
+	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
 	// Create a standard HTTP mux
 	mux := http.NewServeMux()
@@ -57,12 +57,12 @@ func main() {
 		fmt.Fprintf(w, `{"time": "%s", "source": "go"}`, time.Now().Format(time.RFC3339))
 	})
 
-	// Register PHP endpoints directly with the server
-	server.HandlePHP("/api/user", "api/user.php")
-	server.HandlePHP("/api/items", "api/items.php")
+	// Register PHP endpoints (these will be accessible via the wrapped handlers)
+	php.HandlePHP("/api/user", "api/user.php")
+	php.HandlePHP("/api/items", "api/items.php")
 
 	// Handle PHP content under /php/ path
-	mux.Handle("/php/", http.StripPrefix("/php", server))
+	mux.Handle("/php/", http.StripPrefix("/php", php))
 
 	// Create static directory if it doesn't exist
 	os.MkdirAll(staticDir, 0755)
@@ -70,22 +70,36 @@ func main() {
 	// Create sample static files for testing
 	createSampleStaticFiles(staticDir)
 
-	// Static file handling - make sure this comes before API middleware
+	// Static file handling
 	fileServer := http.FileServer(http.Dir(staticDir))
 	mux.Handle("/static/", http.StripPrefix("/static/", fileServer))
 
 	// For API paths, check PHP first then fall back to Go
-	apiHandler := server.AsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Create a fallback handler for API paths
+	apiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// This handler is called when no PHP file handles the request
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"error": "Endpoint not found", "path": "%s", "method": "%s"}`,
 			r.URL.Path, r.Method)
-	}))
+	})
 
-	mux.Handle("/api/", apiHandler)
+	// Wrap the fallback handler with PHP middleware for /api paths
+	mux.Handle("/api/", php.Wrap(apiHandler))
 
-	// Add a root handler using the PHP server directly
-	mux.Handle("/", server)
+	// For root path, handle with PHP middleware first, then fall back to a welcome page
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<h1>Welcome to Frango Middleware Example</h1>"+
+			"<p>Try these paths:</p>"+
+			"<ul>"+
+			"<li><a href='/php/index.php'>PHP Index</a></li>"+
+			"<li><a href='/api/user'>API User (PHP)</a></li>"+
+			"<li><a href='/go/hello'>Go Handler</a></li>"+
+			"<li><a href='/static/style.css'>Static File</a></li>"+
+			"</ul>")
+	})
+
+	mux.Handle("/", php.Wrap(rootHandler))
 
 	// Setup graceful shutdown
 	go func() {
@@ -93,12 +107,13 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
 	// Start server
-	log.Printf("Middleware example server starting on port %s", *port)
+	log.Printf("Middleware example running on port %s", *port)
+	log.Printf("Open http://localhost:%s/ in your browser", *port)
 	if err := http.ListenAndServe(":"+*port, mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}

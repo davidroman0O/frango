@@ -1,9 +1,9 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,34 +24,43 @@ func main() {
 	}
 	log.Printf("Using web directory: %s", webDir)
 
-	// Create server instance with functional options
-	server, err := frango.NewServer(
+	// Create PHP middleware with functional options
+	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
 	// Register all PHP files in the "pages" directory under the "/pages" URL prefix
-	if err := server.HandleDir("/pages", "pages"); err != nil {
+	if err := php.HandleDir("/pages", "pages"); err != nil {
 		log.Fatalf("Error registering pages directory: %v", err)
 	}
 
 	// Register all PHP files in the "api" directory under the "/api" URL prefix
-	if err := server.HandleDir("/api", "api"); err != nil {
+	if err := php.HandleDir("/api", "api"); err != nil {
 		log.Fatalf("Error registering API directory: %v", err)
 	}
 
 	// You can also specify absolute paths
 	// If you have another PHP directory outside the webDir:
-	// if err := server.HandleDir("/other", "/path/to/other/php/files"); err != nil {
+	// if err := php.HandleDir("/other", "/path/to/other/php/files"); err != nil {
 	//     log.Fatalf("Error registering other directory: %v", err)
 	// }
 
 	// Add a custom handler for the root
-	server.HandlePHP("/", "index.php")
+	php.HandlePHP("/", "index.php")
+
+	// Note: In this example, we're using the PHP middleware directly
+	// as the main handler because we don't have any Go-specific routes.
+	// If you wanted to add Go handlers, you would:
+	//
+	// mux := http.NewServeMux()
+	// mux.HandleFunc("/some/go/route", yourGoHandler)
+	// handler := php.Wrap(mux)
+	// http.ListenAndServe(":8082", handler)
 
 	// Setup graceful shutdown
 	go func() {
@@ -59,14 +68,14 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
-	// Start server
+	// Start standard Go HTTP server with PHP middleware as the handler
 	log.Printf("HandleDir Example running on port %s", *port)
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
+	if err := http.ListenAndServe(":"+*port, php); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

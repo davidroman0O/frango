@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -24,7 +23,7 @@ var dashboardTemplate embed.FS
 
 func main() {
 	// Seed the random number generator
-	rand.Seed(time.Now().UnixNano())
+	rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	// Parse command line flags
 	port := flag.String("port", "8082", "Port to listen on")
@@ -33,18 +32,23 @@ func main() {
 
 	log.Printf("Starting server with development mode: %v", !*prodMode)
 
-	// Create server
-	server, err := frango.NewServer(
+	// Create middleware
+	php, err := frango.New(
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
-	// Register the dashboard template with HandleRenderEmbed
+	// Register the dashboard template with embed.FS
 	log.Printf("Embedding dashboard template from %s", "php/dashboard.php")
-	server.HandleRenderEmbed("/", dashboardTemplate, "php/dashboard.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+
+	// First add the file from embed
+	targetPath := php.AddFromEmbed("/dashboard", dashboardTemplate, "php/dashboard.php")
+
+	// Create the render function that will be used for both routes
+	renderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
 		log.Println("Render function called - generating data")
 
 		// Generate some sample data
@@ -101,7 +105,14 @@ func main() {
 		}
 
 		return data
-	})
+	}
+
+	// Register the render handler for the dashboard
+	php.SetRenderHandler("/dashboard", renderFn)
+
+	// Also make it accessible at the root for convenience
+	php.HandlePHP("/", targetPath)
+	php.SetRenderHandler("/", renderFn)
 
 	// Setup graceful shutdown
 	go func() {
@@ -109,14 +120,14 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
 	// Start the server
 	log.Printf("Render Embed Example running on http://localhost:%s", *port)
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
+	if err := http.ListenAndServe(":"+*port, php); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

@@ -1,6 +1,6 @@
 # PHP Template Rendering Example
 
-This example demonstrates how to use Go-PHP's `HandleRender` function to inject dynamic data from Go into PHP templates.
+This example demonstrates how to use Frango's `HandleRender` function to inject dynamic data from Go into PHP templates.
 
 ## Features
 
@@ -23,8 +23,8 @@ render/
 The example demonstrates the data flow between Go and PHP:
 
 1. A Go handler function returns a map of variables
-2. Go-PHP converts these variables to JSON and passes them to PHP
-3. Inside the PHP template, variables are accessible using the `$frango->var('name')` syntax
+2. Frango converts these variables to JSON and passes them to PHP
+3. Inside the PHP template, variables are accessible using helper functions
 4. The PHP template renders dynamic HTML using the variables from Go
 
 ## Running the Example
@@ -41,8 +41,14 @@ Then open your browser to `http://localhost:8082/`
 ## Key Code
 
 ```go
-// Register a render handler for the root path
-server.HandleRender("/", "template.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+// Create PHP middleware
+php, err := frango.New(
+    frango.WithSourceDir(phpDir),
+    frango.WithDevelopmentMode(true),
+)
+
+// Register a render handler that provides dynamic data
+php.HandleRender("/", "template.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
     now := time.Now()
 
     // Return variables to inject into the PHP template
@@ -67,18 +73,42 @@ server.HandleRender("/", "template.php", func(w http.ResponseWriter, r *http.Req
         },
     }
 })
+
+// Start the server with the PHP middleware
+http.ListenAndServe(":8082", php)
 ```
 
 In the PHP template, access the variables like this:
 
 ```php
-<h1><?= $frango->var('title') ?></h1>
+<?php
+// Include helper functions for variable access
+include_once 'render_helper.php';
+
+// Get variables from Go
+$title = go_var('title', 'Default Title');
+$user = go_var('user', []);
+$items = go_var('items', []);
+?>
+
+<h1><?= htmlspecialchars($title) ?></h1>
 
 <!-- Accessing nested objects -->
 <div class="user-info">
-    <p>Name: <?= $frango->var('user')['name'] ?></p>
-    <p>Email: <?= $frango->var('user')['email'] ?></p>
+    <p>Name: <?= htmlspecialchars($user['name']) ?></p>
+    <p>Email: <?= htmlspecialchars($user['email']) ?></p>
 </div>
+
+<!-- Iterating through arrays -->
+<ul class="items">
+    <?php foreach ($items as $item): ?>
+        <li>
+            <strong><?= htmlspecialchars($item['name']) ?></strong>
+            <p><?= htmlspecialchars($item['description']) ?></p>
+            <p>Price: $<?= number_format($item['price'], 2) ?></p>
+        </li>
+    <?php endforeach; ?>
+</ul>
 ```
 
 This pattern allows you to keep your business logic in Go while leveraging PHP for templating and presentation. 

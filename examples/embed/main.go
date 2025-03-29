@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"flag"
 	"log"
@@ -31,37 +30,38 @@ func main() {
 	prodMode := flag.Bool("prod", false, "Enable production mode")
 	flag.Parse()
 
-	// Create a server with functional options
-	server, err := frango.NewServer(
+	// Create a PHP middleware with functional options
+	php, err := frango.New(
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
-	defer server.Shutdown()
+	defer php.Shutdown()
 
-	// Add the PHP files from embedded filesystem - simple and direct
-	// Create files without registering endpoints
-	indexPath := server.AddPHPFromEmbed("/index.php", indexPhp, "php/index.php")
-	userPath := server.AddPHPFromEmbed("/api/user.php", userPhp, "php/api/user.php")
-	itemsPath := server.AddPHPFromEmbed("/api/items.php", itemsPhp, "php/api/items.php")
+	// Add the PHP files from embedded filesystem
+	indexPath := php.AddFromEmbed("/index.php", indexPhp, "php/index.php")
+	userPath := php.AddFromEmbed("/api/user.php", userPhp, "php/api/user.php")
+	itemsPath := php.AddFromEmbed("/api/items.php", itemsPhp, "php/api/items.php")
 
-	// Now explicitly register the endpoints
-	server.HandlePHP("/", indexPath)          // Root path
-	server.HandlePHP("/index", indexPath)     // Without .php extension
-	server.HandlePHP("/index.php", indexPath) // With .php extension
+	// Explicitly register additional routes for these files
+	php.HandlePHP("/", indexPath)      // Root path
+	php.HandlePHP("/index", indexPath) // Without .php extension
 
-	server.HandlePHP("/api/user", userPath)
-	server.HandlePHP("/api/user.php", userPath)
+	php.HandlePHP("/api/user", userPath)
+	php.HandlePHP("/api/items", itemsPath)
 
-	server.HandlePHP("/api/items", itemsPath)
-	server.HandlePHP("/api/items.php", itemsPath)
+	// Create a standard HTTP mux for routing
+	mux := http.NewServeMux()
 
 	// Register a custom Go handler
-	server.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"time": "` + time.Now().Format(time.RFC3339) + `", "source": "go"}`))
 	})
+
+	// PHP middleware handles everything first, falls back to mux
+	handler := php.Wrap(mux)
 
 	// Setup graceful shutdown
 	go func() {
@@ -69,13 +69,14 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 		log.Println("Shutting down server...")
-		server.Shutdown()
+		php.Shutdown()
 		os.Exit(0)
 	}()
 
-	// Start server (this blocks until the server is stopped)
+	// Start server with our handler
 	log.Printf("Embed example server starting on port %s", *port)
-	if err := server.ListenAndServe(context.Background(), ":"+*port); err != nil {
+	log.Printf("Open http://localhost:%s/ in your browser", *port)
+	if err := http.ListenAndServe(":"+*port, handler); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

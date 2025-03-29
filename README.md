@@ -1,14 +1,28 @@
-# Frango - Integrate PHP with Go using FrankenPHP
+# Frango - PHP Middleware for Go
 
-A Go library that makes it easy to integrate PHP code with Go applications using FrankenPHP.
-
-> It started as a joke... i think it's not a joke anymore!
+Frango is a focused, framework-agnostic middleware that integrates PHP into any Go HTTP server using [FrankenPHP](https://github.com/dunglas/frankenphp).
 
 <p align="center">
   <img src="./docs/gopher.png" width="400" height="400" alt="frango Logo">
 </p>
 
-⚠️: work in progress
+## Design Philosophy
+
+Frango is built as a **pure middleware** with no server abstractions. This design:
+
+1. **Maximizes compatibility** - Works with any HTTP server or router
+2. **Minimizes dependencies** - No external dependencies beyond FrankenPHP
+3. **Simplifies integration** - Drop-in middleware pattern fits Go's standard idioms
+4. **Enables flexibility** - Stack PHP processing with other middleware in any order
+
+## Features
+
+- **Pure middleware implementation** - Implements http.Handler for maximum compatibility
+- **Framework adapters** - Specialized adapters for popular frameworks (Chi, Gin, Echo)
+- **Development mode** - Automatic PHP file change detection during development
+- **Path-based routing** - Map URLs to PHP files with fine-grained control
+- **Directory mounting** - Serve entire directories of PHP files with one call
+- **Embedded support** - Embed PHP files directly in your Go binary
 
 ## ⚠️ IMPORTANT: Prerequisites
 
@@ -121,18 +135,6 @@ Before using this library, be aware of these FrankenPHP characteristics:
   - PHP memory resets after each request (just like traditional FPM).
   - There is no global memory space shared between requests by default.
 
-## Features
-
-- Serve PHP files directly from Go applications
-- Register explicit PHP endpoints for precise URL routing control
-- Mix PHP with native Go HTTP handlers in the same application
-- Automatic directory resolution for your PHP files
-- Support for both development and production modes
-- Advanced routing including HTTP method-based routing with path parameters (Go 1.22+)
-- Efficient caching for production environments
-- Embed PHP files directly in your Go binary
-- Use as middleware in existing Go HTTP applications
-
 ## Installation
 
 ```bash
@@ -145,284 +147,188 @@ go get github.com/davidroman0O/frango
 package main
 
 import (
-	"log"
-	"github.com/davidroman0O/frango"
+    "log"
+    "net/http"
+    
+    "github.com/davidroman0O/frango"
 )
 
 func main() {
-	// Find web directory with automatic resolution
-	webDir, err := frango.ResolveDirectory("web")
-	if err != nil {
-		log.Fatalf("Error finding web directory: %v", err)
-	}
-
-	// Create server with functional options
-	server, err := frango.NewServer(
-		frango.WithSourceDir(webDir),
-	)
-	if err != nil {
-		log.Fatalf("Error creating server: %v", err)
-	}
-	defer server.Shutdown()
-
-	// Start serving PHP files
-	if err := server.ListenAndServe(":8082"); err != nil {
-		log.Fatalf("Server error: %v", err)
-	}
+    // Create the PHP middleware
+    php, err := frango.New(
+        frango.WithSourceDir("./web"),
+        frango.WithDevelopmentMode(true),
+    )
+    if err != nil {
+        log.Fatalf("Error creating PHP middleware: %v", err)
+    }
+    defer php.Shutdown()
+    
+    // Register PHP endpoints
+    php.HandlePHP("/api/users", "api/users.php")
+    php.HandleDir("/pages", "pages")
+    
+    // Create standard HTTP mux
+    mux := http.NewServeMux()
+    
+    // Add Go handlers
+    mux.HandleFunc("/api/time", timeHandler)
+    
+    // Use PHP middleware for /api paths
+    mux.Handle("/api/", php.Wrap(http.NotFoundHandler()))
+    
+    // Mount PHP directly for a dedicated path
+    mux.Handle("/php/", http.StripPrefix("/php", php))
+    
+    // Start the server
+    log.Println("Server starting on :8080")
+    http.ListenAndServe(":8080", mux)
 }
 ```
 
-## Core Concepts
+## Integration Patterns
 
-### Directory Resolution
-
-frango automatically finds your web directory:
+### Standard net/http
 
 ```go
-webDir, err := frango.ResolveDirectory("web")
+// Basic usage as middleware
+mux := http.NewServeMux()
+mux.Handle("/api/", php.Wrap(apiHandler))
+
+// Direct mounting
+mux.Handle("/php/", http.StripPrefix("/php", php))
+
+http.ListenAndServe(":8080", mux)
 ```
 
-This will try multiple search strategies:
-1. Check if the path exists as-is
-2. Look relative to the calling code
-3. Check relative to the current working directory
+### Separate PHP and Go Routes
 
-### Running in Development vs Production Mode
+For complex applications, you may want to clearly separate PHP and Go routes:
 
 ```go
-// Development mode (default)
-server, err := frango.NewServer() // Default is development mode
+// Create a router for Go API endpoints
+apiMux := http.NewServeMux()
+apiMux.HandleFunc("GET /api/status", statusHandler)
 
-// Production mode
-server, err := frango.NewServer(
-    frango.WithDevelopmentMode(false),
-    frango.WithCacheDuration(300), // Cache responses for 5 minutes
+// Create a router for PHP pages
+phpMux := http.NewServeMux()
+phpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+    php.ServeHTTP(w, r)
+})
+
+// Register PHP files
+php.HandlePHP("/", "index.php")
+php.HandlePHP("/users", "users.php")
+
+// Create a parent router
+rootMux := http.NewServeMux()
+rootMux.Handle("/api/", apiMux)
+rootMux.Handle("/", phpMux)
+
+http.ListenAndServe(":8080", rootMux)
+```
+
+### Chi Router
+
+```go
+r := chi.NewRouter()
+
+// Mount at a specific path
+r.Mount("/php", php)
+
+// As middleware in a group
+r.Group(func(r chi.Router) {
+    r.Use(php.ForChi())
+    r.Get("/api/*", yourHandler)
+})
+
+http.ListenAndServe(":8080", r)
+```
+
+### Gin
+
+```go
+g := gin.New()
+
+// Use middleware on specific routes
+apiGroup := g.Group("/api")
+apiGroup.Use(func(c *gin.Context) {
+    req := c.Request
+    if php.ShouldHandlePHP(req) {
+        php.ServeHTTP(c.Writer, req)
+        c.Abort()
+        return
+    }
+    c.Next()
+})
+
+g.Run(":8080")
+```
+
+### Echo
+
+```go
+e := echo.New()
+
+// Use the built-in adapter
+e.Use(php.ForEcho())
+
+e.Start(":8080")
+```
+
+## Key Methods
+
+- `New(options...)` - Create a new middleware instance
+- `HandlePHP(pattern, phpFile)` - Register a PHP file at a URL path
+- `HandleDir(prefix, dirPath)` - Register all PHP files in a directory
+- `AddFromEmbed(urlPath, fs, fsPath)` - Add a PHP file from embed.FS
+- `Wrap(next http.Handler)` - Wrap another handler (middleware pattern)
+- `ServeHTTP(w, r)` - Implements http.Handler interface
+- `ShouldHandlePHP(r *http.Request)` - Checks if a request should be handled by PHP
+
+## Configuration Options
+
+```go
+php, err := frango.New(
+    frango.WithSourceDir("./web"),       // Source directory for PHP files
+    frango.WithDevelopmentMode(true),    // Enable development mode
+    frango.WithLogger(customLogger),     // Custom logger
 )
 ```
 
-### Registering Specific Endpoints
+## Data Injection
+
+You can inject Go variables into PHP templates:
 
 ```go
-// Register specific PHP endpoints
-server.HandlePHP("/api/user", "api/user.php")
-server.HandlePHP("/api/items", "api/items.php")
-
-// Register clean URLs (without .php extension)
-server.HandlePHP("/about", "about.php")
-
-// Map multiple URLs to the same PHP file
-server.HandlePHP("/", "index.php")
-server.HandlePHP("/home", "index.php")
-
-// Mix with Go handlers
-server.HandleFunc("/api/time", myTimeHandler)
-```
-
-### Using Method-Based Routing (Go 1.22+)
-
-```go
-// Create a method router
-mux := server.CreateMethodRouter()
-
-// Register PHP endpoints with method constraints and path parameters
-server.Handle("GET /users", "users_list.php")
-server.Handle("POST /users", "users_create.php") 
-server.Handle("GET /users/{id}", "user_detail.php")
-
-// Start the server with the router
-http.ListenAndServe(":8082", mux)
-```
-
-### Using the Render Function to Inject Variables
-
-```go
-// Register a render handler
-server.HandleRender("/dashboard", "dashboard.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
-    // Return a map of variables to inject into the PHP context
+// Register a PHP file with dynamic data
+php.HandleRender("/dashboard", "dashboard.php", func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
     return map[string]interface{}{
+        "title": "Dashboard",
         "user": map[string]interface{}{
-            "id":    42,
-            "name":  "John Doe",
-            "email": "john@example.com",
-            "role":  "Administrator",
-        },
-        "stats": map[string]interface{}{
-            "visits": 12435,
-            "conversions": 532,
-            "revenue": 95432.50,
-        },
-        "items": []map[string]interface{}{
-            {"id": 1, "name": "Product A", "price": 19.99},
-            {"id": 2, "name": "Product B", "price": 29.99},
-            {"id": 3, "name": "Product C", "price": 39.99},
+            "name": "John Doe",
+            "role": "Admin",
         },
     }
 })
 ```
 
-In your PHP file, you can access these variables using the helper functions:
+In PHP, access these variables:
 
 ```php
 <?php
-// Include the helper functions
-include_once 'render_helper.php';
-
-// Get individual variables with defaults
+$title = go_var('title', 'Default Title');
 $user = go_var('user', []);
-$stats = go_var('stats', []);
-$items = go_var('items', []);
 
-// Or get all variables at once
-$allVars = go_vars();
+echo "<h1>$title</h1>";
+echo "<p>Welcome, {$user['name']}!</p>";
 ?>
-
-<h1>Dashboard for <?= htmlspecialchars($user['name']) ?></h1>
-
-<div class="stats">
-    <p>Total Visits: <?= number_format($stats['visits']) ?></p>
-    <p>Conversions: <?= number_format($stats['conversions']) ?></p>
-    <p>Revenue: $<?= number_format($stats['revenue'], 2) ?></p>
-</div>
-
-<h2>Product List</h2>
-<ul>
-    <?php foreach ($items as $item): ?>
-    <li>
-        <?= htmlspecialchars($item['name']) ?> - $<?= number_format($item['price'], 2) ?>
-    </li>
-    <?php endforeach; ?>
-</ul>
 ```
-
-### Embedding PHP Files
-
-```go
-package main
-
-import (
-	"embed"
-	"github.com/davidroman0O/frango"
-)
-
-//go:embed php/index.php
-var indexPhp embed.FS
-
-//go:embed php/api/user.php
-var userPhp embed.FS
-
-func main() {
-	server, err := frango.NewServer()
-	defer server.Shutdown()
-
-	// Add PHP files from embed.FS
-	indexPath := server.AddPHPFromEmbed("/index.php", indexPhp, "php/index.php")
-	userPath := server.AddPHPFromEmbed("/api/user.php", userPhp, "php/api/user.php")
-	
-	// Register endpoints
-	server.HandlePHP("/", indexPath)
-	server.HandlePHP("/api/user", userPath)
-	
-	server.ListenAndServe(":8082")
-}
-```
-
-### Using as Middleware
-
-```go
-// Create a standard HTTP mux
-mux := http.NewServeMux()
-
-// Add Go handlers
-mux.HandleFunc("/go/hello", myGoHandler)
-
-// Use PHP server as middleware
-phpServer, _ := frango.NewServer(options)
-mux.Handle("/php/", http.StripPrefix("/php", phpServer))
-
-// Start server with the mux
-http.ListenAndServe(":8080", mux)
-```
-
-## Examples
-
-The library includes several examples to help you get started:
-
-- **Basic**: Simple PHP endpoint serving with automatic directory resolution
-- **Middleware**: Using frango as middleware in an existing Go application
-- **Embed**: Embedding PHP files directly in your Go binary
-- **Router**: Advanced routing with method-based constraints and path parameters
-
-Run the examples with:
-
-```bash
-# Basic example
-CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/basic
-
-# Run in production mode
-CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/basic -prod
-
-# Router example with advanced routing
-CGO_CFLAGS=$(php-config --includes) CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" go run -tags=nowatcher ./examples/router
-```
-
-<!-- 
-## Troubleshooting
-
-### Common errors
-
-1. **Missing header errors**
-   - For `fatal error: 'wtr/watcher-c.h' file not found`: Use the `-tags=nowatcher` flag when building or running
-   - For `fatal error: 'php_variables.h' file not found`: PHP development headers are missing or not in the include path
-
-2. **Undefined symbols errors**
-   ```
-   Undefined symbols for architecture arm64:
-     "_compiler_globals", referenced from:...
-   ```
-   This indicates that PHP wasn't built correctly. Solutions include:
-   
-   a) Make sure PHP is built with exactly these flags:
-   ```
-   --enable-embed=static --enable-zts --disable-zend-signals --disable-opcache-jit --enable-static --enable-shared=no
-   ```
-   
-   b) Use the install.sh script from the FrankenPHP repository:
-   ```
-   git clone https://github.com/dunglas/frankenphp.git
-   cd frankenphp
-   ./install.sh
-   ```
-   
-   c) Try building FrankenPHP as a standalone binary instead of embedding it:
-   ```
-   git clone https://github.com/dunglas/frankenphp.git
-   cd frankenphp
-   make
-   ```
- I will do more testing
-3. **Simplest alternative approach**
-   Instead of trying to embed FrankenPHP in your Go application, consider:
-   
-   a) Using FrankenPHP as a standalone server:
-   ```bash
-   # Install FrankenPHP with Homebrew
-   brew install dunglas/frankenphp/frankenphp
-   
-   # Run FrankenPHP with your PHP files
-   frankenphp run --config Caddyfile
-   
-   # In a separate terminal, run your Go API server
-   go run api/main.go
-   ```
-   
-   b) Use separate PHP-FPM and Go servers with a reverse proxy in front
-
-4. **PHP extension errors**
-   Make sure the required PHP extensions are installed:
-   ```bash
-   pecl install redis
-   ``` -->
 
 ## License
 
-MIT 
+MIT
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. 
