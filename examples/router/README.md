@@ -23,7 +23,8 @@ web/
 ```
 
 embedded-php/
-  └── dashboard.php       # Embedded dashboard template
+  ├── dashboard.php       # Embedded dashboard template
+  └── utils.php           # Shared PHP utility library
 
 ## How It Works
 
@@ -77,6 +78,35 @@ combinedMux.Handle("/dashboard", phpMux)
 ```
 
 This pattern allows you to include PHP templates directly in your binary while still providing them with dynamic data from your Go application.
+
+### Shared PHP Libraries
+
+The example also demonstrates how to embed shared PHP libraries/utility files that can be included in any PHP template:
+
+```go
+// Embed the PHP utility library
+//go:embed embedded-php/utils.php
+var utilsLibrary embed.FS
+
+// In main function:
+// Add the utility library so it can be included from any PHP page
+php.AddEmbeddedLibrary(utilsLibrary, "embedded-php/utils.php", "/lib/utils.php")
+```
+
+Then in PHP templates, you can include this library:
+
+```php
+<?php
+// Include the utility library
+include_once($_SERVER['DOCUMENT_ROOT'] . '/lib/utils.php');
+
+// Now use functions from the library
+$formattedPrice = format_currency(19.99);
+$truncatedText = truncate($description, 50);
+?>
+```
+
+This lets you maintain shared PHP functionality in a single place and use it across all your templates.
 
 ### Separate PHP and Go Routes
 

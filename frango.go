@@ -1160,6 +1160,7 @@ func (m *Middleware) SetRenderHandler(pattern string, renderFn RenderData) {
 }
 
 // HandleEmbedWithRender combines adding an embedded PHP file and registering a render function in a single call
+// This provides a more intuitive API for the common pattern of embedding a PHP file with dynamic data
 func (m *Middleware) HandleEmbedWithRender(
 	urlPath string,
 	embedFS embed.FS,
@@ -1174,5 +1175,45 @@ func (m *Middleware) HandleEmbedWithRender(
 
 	m.logger.Printf("Registered embedded PHP file with render handler at %s", urlPath)
 
+	return targetPath
+}
+
+// AddEmbeddedLibrary adds a PHP utility/library file from an embed.FS without associating it with any endpoint
+// This allows adding common functions, classes, or other PHP code that can be included in any PHP page
+func (m *Middleware) AddEmbeddedLibrary(
+	embedFS embed.FS,
+	embedPath string,
+	targetLibraryPath string,
+) string {
+	// Read the file from the embed.FS
+	content, err := embedFS.ReadFile(embedPath)
+	if err != nil {
+		m.logger.Printf("Error reading embedded library file %s: %v", embedPath, err)
+		return ""
+	}
+
+	// Make sure targetLibraryPath starts with a slash for consistency
+	if !strings.HasPrefix(targetLibraryPath, "/") {
+		targetLibraryPath = "/" + targetLibraryPath
+	}
+
+	// Create the target path
+	targetPath := filepath.Join(m.sourceDir, strings.TrimPrefix(targetLibraryPath, "/"))
+
+	// Create directory structure
+	if targetDir := filepath.Dir(targetPath); targetDir != "" {
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			m.logger.Printf("Warning: Failed to create directory for library %s: %v", targetLibraryPath, err)
+			return ""
+		}
+	}
+
+	// Write file to disk
+	if err := os.WriteFile(targetPath, content, 0644); err != nil {
+		m.logger.Printf("Warning: Failed to write library file %s: %v", targetPath, err)
+		return ""
+	}
+
+	m.logger.Printf("Added embedded PHP library at %s", targetPath)
 	return targetPath
 }

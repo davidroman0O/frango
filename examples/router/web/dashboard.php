@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Embedded Dashboard</title>
     <?php
+    // Include the utility library
+    include_once($_SERVER['DOCUMENT_ROOT'] . '/lib/utils.php');
+    
     /**
      * Gets a variable injected from Go
      * 
@@ -196,7 +199,7 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Revenue</div>
-                    <div class="stat-value">$<?= number_format($stats['revenue'] ?? 0, 2) ?></div>
+                    <div class="stat-value"><?= format_currency($stats['revenue'] ?? 0) ?></div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Conversion Rate</div>
@@ -222,8 +225,8 @@
                     <tr>
                         <td><?= htmlspecialchars($item['id'] ?? '') ?></td>
                         <td><?= htmlspecialchars($item['name'] ?? '') ?></td>
-                        <td><?= htmlspecialchars($item['description'] ?? '') ?></td>
-                        <td>$<?= number_format($item['price'] ?? 0, 2) ?></td>
+                        <td><?= truncate($item['description'] ?? '', 50) ?></td>
+                        <td><?= format_currency($item['price'] ?? 0) ?></td>
                     </tr>
                     <?php endforeach; ?>
                     <?php if (empty($items)): ?>
@@ -237,7 +240,7 @@
 
         <footer style="margin-top: 40px; border-top: 1px solid #eee; padding-top: 20px; color: #6c757d; font-size: 14px;">
             <?php $debug = go_var('debug_info', []); ?>
-            <p>Generated at: <?= htmlspecialchars($debug['timestamp'] ?? date('Y-m-d H:i:s')) ?></p>
+            <p>Generated at: <?= format_date($debug['timestamp'] ?? time()) ?></p>
         </footer>
     </div>
 </body>

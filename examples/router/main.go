@@ -23,6 +23,11 @@ import (
 //go:embed embedded-php/dashboard.php
 var dashboardTemplate embed.FS
 
+// Embed the PHP utility library
+//
+//go:embed embedded-php/utils.php
+var utilsLibrary embed.FS
+
 // User represents a user in the system
 type User struct {
 	ID        int       `json:"id"`
@@ -129,6 +134,9 @@ func main() {
 		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
 	defer php.Shutdown()
+
+	// Add the PHP utility library that can be included from any PHP page
+	php.AddEmbeddedLibrary(utilsLibrary, "embedded-php/utils.php", "/lib/utils.php")
 
 	// Create our memory store
 	memStore := NewMemoryStore()
