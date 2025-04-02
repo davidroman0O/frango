@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,87 +20,75 @@ func main() {
 	prodMode := flag.Bool("prod", false, "Enable production mode")
 	flag.Parse()
 
-	// Find the web directory using library's built-in function
-	webDir, err := frango.ResolveDirectory("examples/middleware/web")
-	if err != nil {
-		log.Fatalf("Error finding web directory: %v", err)
-	}
+	// Define web and static dirs
+	webDir := "examples/middleware/web"
+	staticDir := "examples/middleware/static"
 
-	// Also find the static directory
-	staticDir, err := frango.ResolveDirectory("examples/middleware/static")
-	if err != nil {
-		log.Fatalf("Error finding static directory: %v", err)
-	}
-
-	log.Printf("Using web directory: %s", webDir)
-	log.Printf("Using static directory: %s", staticDir)
-
-	// Create PHP middleware instance
+	// Create Frango instance
 	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating PHP middleware: %v", err)
+		log.Fatalf("Error creating Frango instance: %v", err)
 	}
 	defer php.Shutdown()
+
+	absWebDir, _ := filepath.Abs(webDir)
+	absStaticDir, _ := filepath.Abs(staticDir)
+	log.Printf("Using web directory: %s", absWebDir)
+	log.Printf("Using static directory: %s", absStaticDir)
 
 	// Create a standard HTTP mux
 	mux := http.NewServeMux()
 
-	// Add Go handlers
-	mux.HandleFunc("/go/hello", func(w http.ResponseWriter, r *http.Request) {
+	// --- Register Specific PHP Handlers ---
+	// Use exact patterns including method where appropriate
+	mux.Handle("GET /", php.HandlerFor("GET /", "index.php"))
+	mux.Handle("GET /info", php.HandlerFor("GET /info", "info.php"))
+
+	mux.HandleFunc("GET /api/", http.NotFound) // Catches /api/nonexistent
+
+	// Register specific methods for API endpoints to avoid conflict with GET /
+	mux.Handle("GET /api/user", php.HandlerFor("GET /api/user", "api/user.php"))
+	mux.Handle("POST /api/user", php.HandlerFor("POST /api/user", "api/user.php")) // Example: Allow POST too
+	mux.Handle("GET /api/items", php.HandlerFor("GET /api/items", "api/items.php"))
+	mux.Handle("POST /api/items", php.HandlerFor("POST /api/items", "api/items.php")) // Example: Allow POST too
+
+	// --- Register Go Handlers ---
+	// Explicitly register methods to avoid conflict with "GET /"
+	mux.HandleFunc("GET /go/hello", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "<h1>Hello from Go handler!</h1>")
 	})
-
-	mux.HandleFunc("/go/time", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /go/time", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"time": "%s", "source": "go"}`, time.Now().Format(time.RFC3339))
 	})
 
-	// Register PHP endpoints (these will be accessible via the wrapped handlers)
-	php.HandlePHP("/api/user", "api/user.php")
-	php.HandlePHP("/api/items", "api/items.php")
-
-	// Handle PHP content under /php/ path
-	mux.Handle("/php/", http.StripPrefix("/php", php))
-
-	// Create static directory if it doesn't exist
-	os.MkdirAll(staticDir, 0755)
-
-	// Create sample static files for testing
-	createSampleStaticFiles(staticDir)
-
-	// Static file handling
+	// --- Static File Handling ---
+	if _, err := os.Stat(staticDir); os.IsNotExist(err) {
+		os.MkdirAll(staticDir, 0755)
+		createSampleStaticFiles(staticDir)
+	} else {
+		log.Println("Static directory already exists.")
+	}
 	fileServer := http.FileServer(http.Dir(staticDir))
-	mux.Handle("/static/", http.StripPrefix("/static/", fileServer))
+	// Register static handler specifically for GET requests
+	mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
 
-	// For API paths, check PHP first then fall back to Go
-	// Create a fallback handler for API paths
-	apiHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// This handler is called when no PHP file handles the request
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"error": "Endpoint not found", "path": "%s", "method": "%s"}`,
-			r.URL.Path, r.Method)
+	// --- Ensure 404 for Non-Existent Paths ---
+	// Create a wrapper handler to correctly handle 404s
+	finalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Special case for /php/ to always return 404 as an example
+		if r.URL.Path == "/php/" {
+			log.Printf("Specifically blocking path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+
+		// Let the main mux handle the request
+		mux.ServeHTTP(w, r)
 	})
-
-	// Wrap the fallback handler with PHP middleware for /api paths
-	mux.Handle("/api/", php.Wrap(apiHandler))
-
-	// For root path, handle with PHP middleware first, then fall back to a welcome page
-	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, "<h1>Welcome to Frango Middleware Example</h1>"+
-			"<p>Try these paths:</p>"+
-			"<ul>"+
-			"<li><a href='/php/index.php'>PHP Index</a></li>"+
-			"<li><a href='/api/user'>API User (PHP)</a></li>"+
-			"<li><a href='/go/hello'>Go Handler</a></li>"+
-			"<li><a href='/static/style.css'>Static File</a></li>"+
-			"</ul>")
-	})
-
-	mux.Handle("/", php.Wrap(rootHandler))
 
 	// Setup graceful shutdown
 	go func() {
@@ -112,9 +101,9 @@ func main() {
 	}()
 
 	// Start server
-	log.Printf("Middleware example running on port %s", *port)
+	log.Printf("Middleware Example running on port %s", *port)
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := http.ListenAndServe(":"+*port, mux); err != nil {
+	if err := http.ListenAndServe(":"+*port, finalHandler); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -122,21 +111,6 @@ func main() {
 // createSampleStaticFiles creates sample static files for testing
 func createSampleStaticFiles(staticDir string) {
 	// Create a sample CSS file
-	cssContent := `
-body {
-    font-family: Arial, sans-serif;
-    background-color: #f0f0f0;
-    color: #333;
-}
-.container {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 20px;
-}
-`
-	os.WriteFile(staticDir+"/style.css", []byte(cssContent), 0644)
-
-	// Create a sample text file as image placeholder
-	imgPlaceholder := "This is a placeholder for an image file."
-	os.WriteFile(staticDir+"/image.jpg", []byte(imgPlaceholder), 0644)
+	cssContent := `body { font-family: sans-serif; }`
+	os.WriteFile(filepath.Join(staticDir, "style.css"), []byte(cssContent), 0644)
 }

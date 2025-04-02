@@ -11,27 +11,27 @@ import (
 )
 
 func main() {
-	// Find web directory with automatic resolution
-	webDir, err := frango.ResolveDirectory("www")
-	if err != nil {
-		log.Fatalf("Error finding web directory: %v", err)
-	}
+	// Define web directory
+	webDir := "www"
 
-	// Create PHP middleware with functional options
+	// Create Frango instance
 	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 	)
 	if err != nil {
-		log.Fatalf("Error creating PHP middleware: %v", err)
+		log.Fatalf("Error creating Frango instance: %v", err)
 	}
 	defer php.Shutdown()
 
-	// Register the Redis API endpoint for the REST API
-	// This uses SimpleRedis.php (pure PHP Redis client) for data storage
-	php.HandlePHP("/api/redis", "api.php")
+	// Create mux and register PHP handlers
+	mux := http.NewServeMux()
 
-	// The root endpoint (/) is automatically handled by index.php
-	// which displays Redis connection status and statistics
+	// Register the Redis API endpoint
+	// Assuming it handles relevant methods (GET/POST etc)
+	mux.Handle("/api/redis", php.HandlerFor("/api/redis", "api.php"))
+
+	// Register the root endpoint (index.php)
+	mux.Handle("/", php.HandlerFor("/", "index.php"))
 
 	// Setup graceful shutdown
 	go func() {
@@ -43,11 +43,12 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// Start the HTTP server with PHP middleware as the handler
+	// Start the HTTP server with the mux
 	log.Println("Starting Redis example server on :8082")
+	log.Printf("Using web directory: %s", php.SourceDir())
 	log.Println("Open http://localhost:8082/ in your browser")
 
-	if err := http.ListenAndServe(":8082", php); err != nil {
+	if err := http.ListenAndServe(":8082", mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

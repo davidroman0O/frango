@@ -2,53 +2,45 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/davidroman0O/frango"
+	frango "github.com/davidroman0O/frango"
 )
 
 func main() {
 	// Enable verbose logging
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	// Parse command line flags
+	port := flag.String("port", "8082", "Port to listen on")
+	prodMode := flag.Bool("prod", false, "Enable production mode")
+	flag.Parse()
 
-	// Find the example directory with PHP files
-	phpDir, err := frango.ResolveDirectory("php")
-	if err != nil {
-		log.Fatalf("Error finding PHP directory: %v", err)
-	}
+	// Define PHP source directory
+	phpDir := "php"
 
-	log.Printf("PHP directory: %s", phpDir)
-
-	// Verify that the template file exists
-	templatePath := strings.Join([]string{phpDir, "template.php"}, string(os.PathSeparator))
-	if _, err := os.Stat(templatePath); err != nil {
-		log.Fatalf("Template file not found at %s: %v", templatePath, err)
-	} else {
-		log.Printf("Template file found at %s", templatePath)
-	}
-
-	// Create a PHP middleware with the PHP directory as source
+	// Create Frango instance
 	php, err := frango.New(
 		frango.WithSourceDir(phpDir),
-		frango.WithDevelopmentMode(true),
-		// Omit the logger option to use the default one
+		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating PHP middleware: %v", err)
+		log.Fatalf("Error creating Frango instance: %v", err)
 	}
 	defer php.Shutdown()
 
-	// Define a simple render function - use the RenderData type
-	var renderFn frango.RenderData = func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+	log.Printf("Using PHP directory: %s", php.SourceDir())
+
+	// Define a simple render function
+	renderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
 		now := time.Now()
-		log.Printf("Render function called for / path")
+		log.Printf("Render function called for path: %s", r.URL.Path)
 
 		// Debug data
 		data := map[string]interface{}{
@@ -81,9 +73,12 @@ func main() {
 		return data
 	}
 
-	// Use HandleRender instead of separate HandlePHP and SetRenderHandler calls
-	// This directly connects the template file with the render function
-	php.HandleRender("/", "template.php", renderFn)
+	// Create mux and register route using RenderHandlerFor
+	mux := http.NewServeMux()
+	// Pattern includes method for Go 1.22+ mux
+	pattern := "GET /"
+	scriptPath := "template.php" // Relative to sourceDir
+	mux.Handle(pattern, php.RenderHandlerFor(pattern, scriptPath, renderFn))
 
 	// Setup graceful shutdown
 	go func() {
@@ -96,9 +91,9 @@ func main() {
 	}()
 
 	// Start the server using standard Go HTTP server
-	log.Printf("Server started at http://localhost:8082")
-	log.Printf("Open http://localhost:8082/ in your browser")
-	if err := http.ListenAndServe(":8082", php); err != nil {
+	log.Printf("Render Example Server started at http://localhost:%s", *port)
+	log.Printf("Open http://localhost:%s/ in your browser", *port)
+	if err := http.ListenAndServe(":"+*port, mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

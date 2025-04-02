@@ -109,7 +109,8 @@
             <?php endforeach; ?>
         </table>
         
-        <a href="/php/" class="back">Back to Home</a>
+        <a href="/php/" class="back">Back to Home (Will 404)</a>
+        <a href="/" class="back" style="margin-left: 10px; background-color: #4CAF50;">Back to Home (Correct)</a>
     </div>
 </body>
 </html> 

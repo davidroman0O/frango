@@ -2,6 +2,24 @@
 /**
  * Main index page that leverages the API endpoints
  */
+
+// Get data from API
+$usersUrl = "http://localhost:" . ($_SERVER["SERVER_PORT"] ?? 8082) . "/api/users";
+$itemsUrl = "http://localhost:" . ($_SERVER["SERVER_PORT"] ?? 8082) . "/api/items";
+
+$usersJson = @file_get_contents($usersUrl);
+$itemsJson = @file_get_contents($itemsUrl);
+
+$usersData = json_decode($usersJson, true);
+$itemsData = json_decode($itemsJson, true);
+
+// Get flash messages from Go (passed via RenderHandlerFor)
+$flashMessages = json_decode($_SERVER['FRANGO_VAR_flash_messages'] ?? '[]', true) ?? [];
+
+// Ensure $flashMessages is always an array
+if (!is_array($flashMessages)) {
+    $flashMessages = [];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -111,31 +129,16 @@
     <h1>Go-PHP Router Example</h1>
     <p>This example demonstrates the integration between Go and PHP using REST APIs. The Go backend provides the data while PHP renders the UI.</p>
     
-    <?php
-    // Fetch data from our API endpoints
-    $usersJson = file_get_contents('http://localhost:' . ($_SERVER['SERVER_PORT'] ?? 8082) . '/api/users');
-    $itemsJson = file_get_contents('http://localhost:' . ($_SERVER['SERVER_PORT'] ?? 8082) . '/api/items');
-    
-    // Parse the JSON responses
-    $usersData = json_decode($usersJson, true);
-    $itemsData = json_decode($itemsJson, true);
-    
-    // Get success/error messages from URL parameters
-    $message = $_GET['message'] ?? '';
-    $error = $_GET['error'] ?? '';
-    $success = $_GET['success'] ?? '';
-    
-    // Display any messages
-    if ($message) {
-        echo '<div class="info-message">' . htmlspecialchars($message) . '</div>';
-    }
-    if ($error) {
-        echo '<div class="error-message">' . htmlspecialchars($error) . '</div>';
-    }
-    if ($success) {
-        echo '<div class="success-message">' . htmlspecialchars($success) . '</div>';
-    }
+    <?php 
+    // Display flash messages - handle both uppercase and lowercase field names
+    foreach ($flashMessages as $message): 
+        // Try both uppercase and lowercase keys
+        $type = $message['Type'] ?? $message['type'] ?? 'info';
+        $content = $message['Content'] ?? $message['content'] ?? '';
+        $msgClass = $type . '-message';
     ?>
+        <div class="<?= $msgClass ?>"><?= htmlspecialchars($content) ?></div>
+    <?php endforeach; ?>
     
     <div class="container">
         <div class="card">
@@ -159,12 +162,9 @@
                                 <td><?= htmlspecialchars($user['email']) ?></td>
                                 <td><?= htmlspecialchars($user['role']) ?></td>
                                 <td>
-                                    <a href="user_detail.php?id=<?= $user['id'] ?>" class="btn">View</a>
-                                    <a href="user_edit.php?id=<?= $user['id'] ?>" class="btn">Edit</a>
-                                    <form method="post" action="user_delete.php" style="display:inline">
-                                        <input type="hidden" name="id" value="<?= $user['id'] ?>">
-                                        <button type="submit" class="btn btn-danger" onclick="return confirm('Are you sure you want to delete this user?')">Delete</button>
-                                    </form>
+                                    <a href="/users/<?= $user['id'] ?>" class="btn">View</a>
+                                    <a href="/users/<?= $user['id'] ?>/edit" class="btn">Edit</a>
+                                    <button type="button" class="btn btn-danger" onclick="deleteUser(<?= $user['id'] ?>)">Delete (JS)</button>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -177,7 +177,7 @@
             </table>
             
             <h3>Add New User</h3>
-            <form action="user_create.php" method="post">
+            <form action="/api/users" method="post" id="addUserForm">
                 <div class="form-group">
                     <label for="name">Name:</label>
                     <input type="text" id="name" name="name" required>
@@ -216,7 +216,7 @@
                                 <td><?= htmlspecialchars($item['name']) ?></td>
                                 <td><?= htmlspecialchars($item['description']) ?></td>
                                 <td>
-                                    <a href="item_detail.php?id=<?= $item['id'] ?>" class="btn">View</a>
+                                    <a href="/items/<?= $item['id'] ?>" class="btn">View</a>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -229,7 +229,7 @@
             </table>
             
             <h3>Add New Item</h3>
-            <form action="item_create.php" method="post">
+            <form action="/api/items" method="post" id="addItemForm">
                 <div class="form-group">
                     <label for="item_name">Name:</label>
                     <input type="text" id="item_name" name="name" required>
@@ -245,7 +245,84 @@
     
     <footer style="margin-top: 40px; text-align: center; color: #7f8c8d; font-size: 14px;">
         <p>Page generated at: <?= date('Y-m-d H:i:s') ?></p>
-        <p>API endpoints available at: /api/users and /api/items</p>
+        <p>API endpoints available at: /api/*</p>
     </footer>
+
+    <script>
+        // Basic JS for Add User form submission (using fetch)
+        document.getElementById('addUserForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            const data = Object.fromEntries(formData.entries());
+            
+            fetch('/api/users', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            })
+            .then(response => response.json())
+            .then(result => {
+                console.log('Success:', result);
+                // Use our Go message endpoint to set the message
+                window.location.href = '/message?type=success&content=' + 
+                    encodeURIComponent('User ' + (result.user?.name || '') + ' created');
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                window.location.href = '/message?type=error&content=' + 
+                    encodeURIComponent('Failed to create user');
+            });
+        });
+        
+        // Basic JS for Add Item form submission
+        document.getElementById('addItemForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            const data = Object.fromEntries(formData.entries());
+
+            fetch('/api/items', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(data),
+            })
+            .then(response => response.json())
+            .then(result => {
+                console.log('Success:', result);
+                window.location.href = '/message?type=success&content=' + 
+                    encodeURIComponent('Item ' + (result.item?.name || '') + ' created');
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                window.location.href = '/message?type=error&content=' + 
+                    encodeURIComponent('Failed to create item');
+            });
+        });
+
+        // Basic JS for Delete User button
+        function deleteUser(userId) {
+            if (!confirm('Are you sure you want to delete user ' + userId + '?')) {
+                return;
+            }
+            fetch('/api/users/' + userId, {
+                method: 'DELETE',
+            })
+            .then(response => response.json())
+            .then(result => {
+                console.log('Success:', result);
+                window.location.href = '/message?type=success&content=' + 
+                    encodeURIComponent('User ' + userId + ' deleted');
+            })
+            .catch((error) => {
+                console.error('Error:', error);
+                window.location.href = '/message?type=error&content=' + 
+                    encodeURIComponent('Failed to delete user ' + userId);
+            });
+        }
+    </script>
+
 </body>
 </html> 

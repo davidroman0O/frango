@@ -67,8 +67,8 @@ $timestamp = date('Y-m-d H:i:s');
             
             <div class="category">PHP Routes (handled by Go-PHP):</div>
             <div class="links">
-                <a href="/php/">PHP Home</a>
-                <a href="/php/info.php">PHP Info</a>
+                <a href="/">PHP Home</a>
+                <a href="/info">PHP Info</a>
                 <a href="/api/user">API: User</a>
                 <a href="/api/items">API: Items</a>
             </div>

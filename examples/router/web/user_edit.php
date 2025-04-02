@@ -3,11 +3,11 @@
  * User edit page and form handler
  */
 
-// Get user ID from query parameters
-$userId = $_GET['id'] ?? null;
+// Get user ID from path parameters 
+$userId = $_SERVER['FRANGO_PARAM_id'] ?? null;
 
 if (!$userId) {
-    header('Location: index.php?error=User ID is required');
+    header('Location: /message?type=error&content=User+ID+is+required');
     exit;
 }
 
@@ -62,7 +62,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $response = @file_get_contents($apiUrl);
     
     if ($response === false) {
-        header('Location: index.php?error=Failed to fetch user data');
+        header('Location: /message?type=error&content=Failed+to+fetch+user+data');
         exit;
     }
     
@@ -71,7 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // Check if user was found
     if (!isset($result['user'])) {
-        header('Location: index.php?error=User not found');
+        header('Location: /message?type=error&content=User+not+found');
         exit;
     }
     
@@ -184,13 +184,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             <div>
                 <button type="submit" class="btn">Update User</button>
-                <a href="user_detail.php?id=<?= $userData['id'] ?>" class="btn">Cancel</a>
+                <a href="/users/<?= $userData['id'] ?>" class="btn">Cancel</a>
             </div>
         </form>
     </div>
     
     <div>
-        <a href="index.php" class="btn">Back to List</a>
+        <a href="/" class="btn">Back to List</a>
     </div>
 </body>
 </html> 

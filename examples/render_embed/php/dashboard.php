@@ -20,11 +20,11 @@ echo "</pre>";
 // Try multiple approaches to get variables
 function getVar($name, $default = []) {
     // Try multiple places where variables could be
-    if (isset($_ENV['frango_VAR_' . $name])) {
-        return json_decode($_ENV['frango_VAR_' . $name], true);
+    if (isset($_ENV['FRANGO_VAR_' . $name])) {
+        return json_decode($_ENV['FRANGO_VAR_' . $name], true);
     } 
-    if (isset($_SERVER['frango_VAR_' . $name])) {
-        return json_decode($_SERVER['frango_VAR_' . $name], true);
+    if (isset($_SERVER['FRANGO_VAR_' . $name])) {
+        return json_decode($_SERVER['FRANGO_VAR_' . $name], true);
     }
     if (isset($_SERVER['HTTP_FRANGO_VAR_' . $name])) {
         return json_decode($_SERVER['HTTP_FRANGO_VAR_' . $name], true);

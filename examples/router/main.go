@@ -4,7 +4,6 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -50,6 +49,19 @@ type Item struct {
 type MemoryStore struct {
 	mu    sync.RWMutex
 	store map[string]interface{}
+}
+
+// Message types for flash messaging
+const (
+	MessageTypeError   = "error"
+	MessageTypeSuccess = "success"
+	MessageTypeInfo    = "info"
+)
+
+// Message represents a flash message to display to the user
+type Message struct {
+	Type    string `json:"type"`
+	Content string `json:"content"`
 }
 
 // NewMemoryStore creates a new memory store instance
@@ -112,188 +124,156 @@ func (ms *MemoryStore) IncrementCounter(key string) int {
 	return counter
 }
 
+// AddMessage adds a flash message to be displayed on the next page load
+func (ms *MemoryStore) AddMessage(msgType, content string) {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	messages, _ := ms.store["flash_messages"].([]Message)
+	// Create a message with lowercase field names
+	message := Message{
+		Type:    msgType, // Will be marshaled to "type" in JSON
+		Content: content, // Will be marshaled to "content" in JSON
+	}
+	messages = append(messages, message)
+	ms.store["flash_messages"] = messages
+}
+
+// GetAndClearMessages returns all messages and clears them from the store
+func (ms *MemoryStore) GetAndClearMessages() []Message {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	// Initialize flash_messages if it doesn't exist or is nil
+	if _, exists := ms.store["flash_messages"]; !exists || ms.store["flash_messages"] == nil {
+		ms.store["flash_messages"] = []Message{}
+	}
+
+	// Get messages
+	messages, ok := ms.store["flash_messages"].([]Message)
+	if !ok {
+		// If type assertion fails, return empty array
+		ms.store["flash_messages"] = []Message{}
+		return []Message{}
+	}
+
+	// Clear messages
+	ms.store["flash_messages"] = []Message{}
+	return messages
+}
+
 func main() {
 	// Parse command line flags
 	port := flag.String("port", "8082", "Port to listen on")
 	prodMode := flag.Bool("prod", false, "Enable production mode")
 	flag.Parse()
 
-	// Find the web directory
-	webDir, err := frango.ResolveDirectory("web")
-	if err != nil {
-		log.Fatalf("Error finding web directory: %v", err)
-	}
-	log.Printf("Using web directory: %s", webDir)
+	// Define web directory
+	webDir := "web"
 
-	// Create middleware instance with functional options
+	// Create Frango instance
 	php, err := frango.New(
 		frango.WithSourceDir(webDir),
 		frango.WithDevelopmentMode(!*prodMode),
 	)
 	if err != nil {
-		log.Fatalf("Error creating PHP middleware: %v", err)
+		log.Fatalf("Error creating Frango instance: %v", err)
 	}
 	defer php.Shutdown()
 
-	// Add the PHP utility library that can be included from any PHP page
-	php.AddEmbeddedLibrary(utilsLibrary, "embedded-php/utils.php", "/lib/utils.php")
+	// Add the embedded PHP utility library
+	_, err = php.AddEmbeddedLibrary(utilsLibrary, "embedded-php/utils.php", "/lib/utils.php")
+	assertNoError(err, "Add utils.php lib")
 
-	// Create our memory store
+	// Create memory store and initialize data
 	memStore := NewMemoryStore()
-
-	// Add sample data to the memory store
 	initializeMemoryStore(memStore)
 
-	// Create a standard HTTP mux for routing with method patterns
+	// Create the main mux
 	mux := http.NewServeMux()
 
-	// Register API endpoints for users - pure Go endpoints
-	registerUserEndpoints(mux, memStore)
+	// --- Register Go API Endpoints ---
+	registerUserEndpoints(mux, memStore) // Assume this uses mux.HandleFunc internally
+	registerItemEndpoints(mux, memStore) // Assume this uses mux.HandleFunc internally
+	mux.HandleFunc("GET /api/memory", func(w http.ResponseWriter, r *http.Request) { /* ... */ })
+	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { /* ... */ })
 
-	// Register API endpoints for items - pure Go endpoints
-	registerItemEndpoints(mux, memStore)
-
-	// Register purely Go handlers for status and memory info
-	mux.HandleFunc("GET /api/memory", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		// Get data from the memory store
-		pageViews := memStore.IncrementCounter("page_views")
-		allKeys := memStore.GetAllValues()
-
-		// Build keys list
-		keys := make([]string, 0, len(allKeys))
-		for k := range allKeys {
-			keys = append(keys, k)
+	// --- Register PHP Handlers ---
+	// Register specific handlers for each page/view
+	indexRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
+		// Get flash messages if any and clear them
+		messages := memStore.GetAndClearMessages()
+		if messages == nil {
+			messages = []Message{} // Ensure it's initialized to an empty array
 		}
 
-		// Return memory store info
-		response := map[string]interface{}{
-			"status": "ok",
-			"memory_store": map[string]interface{}{
-				"keys":       keys,
-				"page_views": pageViews,
-				"uptime":     time.Now().Format(time.RFC3339),
-			},
+		// Get query parameters for backward compatibility
+		if errorMsg := r.URL.Query().Get("error"); errorMsg != "" {
+			messages = append(messages, Message{Type: MessageTypeError, Content: errorMsg})
+		}
+		if successMsg := r.URL.Query().Get("success"); successMsg != "" {
+			messages = append(messages, Message{Type: MessageTypeSuccess, Content: successMsg})
+		}
+		if infoMsg := r.URL.Query().Get("message"); infoMsg != "" {
+			messages = append(messages, Message{Type: MessageTypeInfo, Content: infoMsg})
 		}
 
-		json.NewEncoder(w).Encode(response)
-	})
+		return map[string]interface{}{
+			"flash_messages": messages,
+		}
+	}
+	// Use RenderHandlerFor for index page to pass messages
+	mux.Handle("GET /", php.RenderHandlerFor("GET /", "index.php", indexRenderFn))
 
-	// Add native Go handler for status
-	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","time":"%s"}`, time.Now().Format(time.RFC3339))
-	})
+	// Use parameterized paths for detail/edit views
+	mux.Handle("GET /users/{id}", php.HandlerFor("GET /users/{id}", "user_detail.php"))
+	mux.Handle("GET /items/{id}", php.HandlerFor("GET /items/{id}", "item_detail.php"))
+	mux.Handle("GET /users/{id}/edit", php.HandlerFor("GET /users/{id}/edit", "user_edit.php"))
+	mux.Handle("POST /users/{id}/edit", php.HandlerFor("POST /users/{id}/edit", "user_edit.php")) // Assumes user_edit handles POST for updates
 
-	// Create a separate PHP mux
-	phpMux := http.NewServeMux()
-
-	// Register PHP endpoints
-	// These will only be handled by the PHP middleware
-	phpMux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
-		php.ServeHTTP(w, r)
-	})
-	phpMux.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
-		php.ServeHTTP(w, r)
-	})
-	phpMux.HandleFunc("/items", func(w http.ResponseWriter, r *http.Request) {
-		php.ServeHTTP(w, r)
-	})
-	phpMux.HandleFunc("/items/{id}", func(w http.ResponseWriter, r *http.Request) {
-		php.ServeHTTP(w, r)
-	})
-	phpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		php.ServeHTTP(w, r)
-	})
-
-	// Register PHP handler routes
-	php.HandlePHP("/users", "api/users.php")
-	php.HandlePHP("/users/{id}", "api/user.php")
-	php.HandlePHP("/items", "api/items.php")
-	php.HandlePHP("/items/{id}", "api/item.php")
-	php.HandlePHP("/", "index.php")
-
-	// Create a combined router that handles both PHP and Go routes
-	combinedMux := http.NewServeMux()
-
-	// Register the PHP routes
-	combinedMux.Handle("/users", phpMux)
-	combinedMux.Handle("/users/", phpMux)
-	combinedMux.Handle("/items", phpMux)
-	combinedMux.Handle("/items/", phpMux)
-	combinedMux.Handle("/", phpMux)
-
-	// Register the Go API routes
-	combinedMux.Handle("/api/", mux)
-
-	// Setup embedded dashboard with dynamic data
+	// --- Register Embedded Rendered Dashboard ---
 	dashboardRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
 		log.Println("Dashboard render function called - generating data")
-
-		// Get data from the memory store
 		pageViews := memStore.GetValue("page_views")
 		if pageViews == nil {
 			pageViews = 0
 		}
-
-		// Extract users from memory store
 		var users []map[string]interface{}
 		if usersVal := memStore.GetValue("users"); usersVal != nil {
 			if usersSlice, ok := usersVal.([]map[string]interface{}); ok {
 				users = usersSlice
 			}
 		}
-
-		// Extract items from memory store
 		var items []map[string]interface{}
 		if itemsVal := memStore.GetValue("items"); itemsVal != nil {
 			if itemsSlice, ok := itemsVal.([]map[string]interface{}); ok {
 				items = itemsSlice
 			}
 		}
-
-		// Count active users (simulate with a random percentage of total)
 		totalUsers := len(users)
-		activeUsers := int(float64(totalUsers) * 0.7) // 70% active rate
+		activeUsers := int(float64(totalUsers) * 0.7)
 		if activeUsers < 1 && totalUsers > 0 {
 			activeUsers = 1
 		}
-
-		// Create stats
 		stats := map[string]interface{}{
-			"total_users":     totalUsers,
-			"active_users":    activeUsers,
-			"total_products":  len(items),
-			"revenue":         12568.99, // Simulated revenue
-			"conversion_rate": "3.2%",   // Simulated conversion rate
+			"total_users": totalUsers, "active_users": activeUsers, "total_products": len(items),
+			"revenue": 12568.99, "conversion_rate": "3.2%",
 		}
-
-		// Create data to pass to the PHP template
-		data := map[string]interface{}{
+		return map[string]interface{}{
 			"title": "Router Example - Embedded Dashboard",
-			"user": map[string]interface{}{
-				"name":  "Admin User",
-				"email": "admin@example.com",
-				"role":  "Administrator",
-			},
-			"items": items,
-			"stats": stats,
+			"user":  map[string]interface{}{"name": "Admin User", "email": "admin@example.com", "role": "Administrator"},
+			"items": items, "stats": stats,
 			"debug_info": map[string]interface{}{
-				"timestamp":   time.Now().Format(time.RFC3339),
-				"page_views":  pageViews,
-				"memory_keys": len(memStore.GetAllValues()),
+				"timestamp": time.Now().Format(time.RFC3339), "page_views": pageViews, "memory_keys": len(memStore.GetAllValues()),
 			},
 		}
-
-		return data
 	}
-
-	// Register the embedded dashboard with its render function using the new intuitive method
-	php.HandleEmbedWithRender("/dashboard", dashboardTemplate, "embedded-php/dashboard.php", dashboardRenderFn)
-
-	// Update combined router to handle the dashboard route
-	combinedMux.Handle("/dashboard", phpMux)
+	// Add the embedded template file first
+	tempDashboardPath, err := php.AddEmbeddedLibrary(dashboardTemplate, "embedded-php/dashboard.php", "/dashboard.php")
+	assertNoError(err, "Add dashboard.php template")
+	// Register the handler using the temp path
+	dashboardPattern := "GET /dashboard"
+	mux.Handle(dashboardPattern, php.RenderHandlerFor(dashboardPattern, tempDashboardPath, dashboardRenderFn))
 
 	// Setup graceful shutdown
 	go func() {
@@ -305,10 +285,11 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// Start the server with our combined router
+	// Start the server with the single combined mux
 	log.Printf("Router Example running on port %s", *port)
+	log.Printf("Using web directory: %s", php.SourceDir())
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := http.ListenAndServe(":"+*port, combinedMux); err != nil {
+	if err := http.ListenAndServe(":"+*port, mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -603,6 +584,19 @@ func registerUserEndpoints(mux *http.ServeMux, memStore *MemoryStore) {
 
 		json.NewEncoder(w).Encode(response)
 	})
+
+	// Add a handler for showing a message without redirecting to a specific path
+	mux.HandleFunc("GET /message", func(w http.ResponseWriter, r *http.Request) {
+		msgType := r.URL.Query().Get("type")
+		content := r.URL.Query().Get("content")
+
+		if msgType != "" && content != "" {
+			memStore.AddMessage(msgType, content)
+		}
+
+		// Redirect to home page
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
 }
 
 // Register all item-related API endpoints
@@ -725,4 +719,11 @@ func registerItemEndpoints(mux *http.ServeMux, memStore *MemoryStore) {
 
 		json.NewEncoder(w).Encode(response)
 	})
+}
+
+// Simple error helper
+func assertNoError(err error, context string) {
+	if err != nil {
+		log.Fatalf("Error during setup (%s): %v", context, err)
+	}
 }
