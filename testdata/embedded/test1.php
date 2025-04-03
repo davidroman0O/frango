@@ -1,0 +1,1 @@
+<?php echo 'Embedded directory test file 1'; ?> 
