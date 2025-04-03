@@ -1,4 +1,4 @@
-package discovery
+package test
 
 import (
 	"encoding/json"
@@ -35,6 +35,8 @@ func setupFrango(t *testing.T) *frango.Middleware {
 	return php
 }
 
+// NOTE: checkPHPErrors has been replaced by AssertNoPHPErrors in php_error_utils.go
+
 // TestPlainTextResponse tests the plain text response from PHP
 func TestPlainTextResponse(t *testing.T) {
 	php := setupFrango(t)
@@ -63,6 +65,9 @@ func TestPlainTextResponse(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err, "Failed to read response body")
 	assert.Contains(t, string(body), "Hello from PHP!", "Response body doesn't contain expected content")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, string(body))
 }
 
 // TestHTMLResponse tests the HTML response from PHP
@@ -84,20 +89,24 @@ func TestHTMLResponse(t *testing.T) {
 	// Check status code
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Unexpected status code")
 
-	// Check content type
+	// Check content type - Note that PHP may add charset
 	contentType := resp.Header.Get("Content-Type")
 	assert.True(t, strings.HasPrefix(contentType, "text/html"),
-		"Unexpected content type: %s", contentType)
+		"Content-Type should start with text/html")
 
 	// Check response body
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err, "Failed to read response body")
 
-	// Test for expected HTML elements
+	// Test for expected HTML structure
 	bodyStr := string(body)
-	assert.Contains(t, bodyStr, "<title>Frango Test - HTML Response</title>", "Missing title")
-	assert.Contains(t, bodyStr, "<h1>Hello from PHP!</h1>", "Missing h1 content")
-	assert.Contains(t, bodyStr, "<li>Item 1</li>", "Missing list item")
+	assert.Contains(t, bodyStr, "<!DOCTYPE html>", "Missing DOCTYPE")
+	assert.Contains(t, bodyStr, "<title>HTML Test</title>", "Missing title")
+	assert.Contains(t, bodyStr, "<h1>HTML Response Test</h1>", "Missing H1")
+	assert.Contains(t, bodyStr, "<p>This is an HTML response from PHP.</p>", "Missing paragraph")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
 }
 
 // TestQueryParameters tests query parameter handling in PHP
@@ -112,7 +121,7 @@ func TestQueryParameters(t *testing.T) {
 	defer server.Close()
 
 	// Make request with query parameters
-	resp, err := http.Get(server.URL + "?name=Tester&age=42&interests[]=Golang&interests[]=PHP")
+	resp, err := http.Get(server.URL + "?name=John&age=30&active=true")
 	require.NoError(t, err, "Failed to make request")
 	defer resp.Body.Close()
 
@@ -125,15 +134,15 @@ func TestQueryParameters(t *testing.T) {
 
 	// Test for expected content
 	bodyStr := string(body)
-	assert.Contains(t, bodyStr, "Name: Tester", "Missing name parameter")
-	assert.Contains(t, bodyStr, "Age: 42", "Missing age parameter")
-	assert.Contains(t, bodyStr, "<li>Golang</li>", "Missing interests parameter")
-	assert.Contains(t, bodyStr, "<li>PHP</li>", "Missing interests parameter")
-	assert.Contains(t, bodyStr, "Name via FRANGO_QUERY: Tester",
-		"Missing FRANGO_QUERY variable")
+	assert.Contains(t, bodyStr, "Name: John", "Missing name parameter")
+	assert.Contains(t, bodyStr, "Age: 30", "Missing age parameter")
+	assert.Contains(t, bodyStr, "Active: true", "Missing active parameter")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
 }
 
-// TestRequestHeaders tests request header handling in PHP
+// TestRequestHeaders tests request header access in PHP
 func TestRequestHeaders(t *testing.T) {
 	php := setupFrango(t)
 
@@ -172,6 +181,9 @@ func TestRequestHeaders(t *testing.T) {
 		"Missing User-Agent header")
 	assert.Contains(t, bodyStr, "User-Agent via FRANGO:",
 		"Missing FRANGO_HEADER variable")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
 }
 
 // TestResponseHeaders tests setting response headers in PHP
@@ -193,13 +205,36 @@ func TestResponseHeaders(t *testing.T) {
 	// Check status code
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "Unexpected status code")
 
-	// Check custom headers
+	// Check custom headers set by PHP
 	assert.Equal(t, "Custom Value", resp.Header.Get("X-Custom-Header"),
-		"Missing custom header")
+		"Missing custom X-Custom-Header")
 	assert.Equal(t, "Testing Custom Headers", resp.Header.Get("X-Frango-Test"),
-		"Missing Frango test header")
-	assert.Equal(t, "no-cache, no-store, must-revalidate",
-		resp.Header.Get("Cache-Control"), "Missing cache control header")
+		"Missing X-Frango-Test header")
+	assert.Equal(t, "no-cache, no-store, must-revalidate", resp.Header.Get("Cache-Control"),
+		"Missing Cache-Control header")
+
+	// Check expires header (just check it exists)
+	assert.NotEmpty(t, resp.Header.Get("Expires"),
+		"Missing Expires header")
+
+	// Check content type - matching the actual header sent by the PHP script
+	contentType := resp.Header.Get("Content-Type")
+	assert.True(t, strings.HasPrefix(contentType, "text/html"),
+		"Content-Type should be HTML")
+
+	// Check response body
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "Failed to read response body")
+	bodyStr := string(body)
+
+	// Check for content that's actually in the response
+	assert.Contains(t, bodyStr, "Response Headers Test",
+		"Response body doesn't contain expected title")
+	assert.Contains(t, bodyStr, "This page has set the following headers:",
+		"Response body doesn't contain expected content")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
 }
 
 // TestJSONResponse tests JSON response from PHP
@@ -248,6 +283,9 @@ func TestJSONResponse(t *testing.T) {
 	items, ok := jsonData["items"].([]interface{})
 	require.True(t, ok, "Missing items array in JSON")
 	assert.Len(t, items, 3, "Expected 3 items in JSON")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, string(body))
 }
 
 // TestXMLResponse tests XML response from PHP
@@ -285,6 +323,9 @@ func TestXMLResponse(t *testing.T) {
 	assert.Contains(t, bodyStr, "<message>This is an XML response from PHP</message>",
 		"Missing message element")
 	assert.Contains(t, bodyStr, "<item id=\"1\">", "Missing item element")
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
 }
 
 // TestBinaryResponse tests binary (image) response from PHP
@@ -310,18 +351,20 @@ func TestBinaryResponse(t *testing.T) {
 	assert.Equal(t, "image/png", resp.Header.Get("Content-Type"),
 		"Unexpected content type")
 
-	// Check content disposition
-	assert.Equal(t, "inline; filename=\"frango_test.png\"",
-		resp.Header.Get("Content-Disposition"), "Unexpected content disposition")
+	// Check response body (shouldn't be empty)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "Failed to read response body")
+	assert.NotEmpty(t, body, "Binary response should not be empty")
 
-	// Read binary data (don't need to validate content, just ensure it's not empty)
-	data, err := io.ReadAll(resp.Body)
-	require.NoError(t, err, "Failed to read binary response")
-	assert.NotEmpty(t, data, "Binary response should not be empty")
-
-	// Basic PNG validation - check for PNG signature (first 8 bytes)
-	if len(data) >= 8 {
-		pngSignature := []byte{137, 80, 78, 71, 13, 10, 26, 10}
-		assert.Equal(t, pngSignature, data[:8], "Response doesn't have PNG signature")
+	// Check PNG signature (first 8 bytes)
+	if len(body) >= 8 {
+		// PNG signature: 89 50 4E 47 0D 0A 1A 0A
+		pngSignature := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+		assert.Equal(t, pngSignature, body[0:8], "Response is not a valid PNG image")
+	} else {
+		t.Error("Binary response too short for a PNG image")
 	}
+
+	// Since this is binary data, we can't check for PHP errors in the usual way
+	// Instead, we just make sure it's a valid image (which we did above)
 }

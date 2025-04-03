@@ -5,6 +5,7 @@ header('Content-Type: text/html; charset=UTF-8');
 // Get query parameters
 $name = $_GET['name'] ?? 'Guest';
 $age = $_GET['age'] ?? 'Unknown';
+$active = $_GET['active'] ?? '';
 $interests = $_GET['interests'] ?? [];
 
 // Also check the FRANGO_QUERY_ variables
@@ -22,6 +23,7 @@ $frangoName = $_SERVER['FRANGO_QUERY_name'] ?? 'Not set in FRANGO_QUERY';
     <ul>
         <li>Name: <?= htmlspecialchars($name) ?></li>
         <li>Age: <?= htmlspecialchars($age) ?></li>
+        <li>Active: <?= htmlspecialchars($active) ?></li>
         <li>Interests: 
             <?php if (is_array($interests)): ?>
                 <ul>

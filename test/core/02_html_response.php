@@ -5,11 +5,11 @@ header('Content-Type: text/html; charset=UTF-8');
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Frango Test - HTML Response</title>
+    <title>HTML Test</title>
 </head>
 <body>
-    <h1>Hello from PHP!</h1>
-    <p>This is an HTML response.</p>
+    <h1>HTML Response Test</h1>
+    <p>This is an HTML response from PHP.</p>
     <ul>
         <li>Item 1</li>
         <li>Item 2</li>
