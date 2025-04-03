@@ -44,16 +44,16 @@ func main() {
 
 	// --- Register Specific PHP Handlers ---
 	// Use exact patterns including method where appropriate
-	mux.Handle("GET /", php.HandlerFor("GET /", "index.php"))
-	mux.Handle("GET /info", php.HandlerFor("GET /info", "info.php"))
+	mux.Handle("GET /", php.For("index.php"))
+	mux.Handle("GET /info", php.For("info.php"))
 
 	mux.HandleFunc("GET /api/", http.NotFound) // Catches /api/nonexistent
 
 	// Register specific methods for API endpoints to avoid conflict with GET /
-	mux.Handle("GET /api/user", php.HandlerFor("GET /api/user", "api/user.php"))
-	mux.Handle("POST /api/user", php.HandlerFor("POST /api/user", "api/user.php")) // Example: Allow POST too
-	mux.Handle("GET /api/items", php.HandlerFor("GET /api/items", "api/items.php"))
-	mux.Handle("POST /api/items", php.HandlerFor("POST /api/items", "api/items.php")) // Example: Allow POST too
+	mux.Handle("GET /api/user", php.For("api/user.php"))
+	mux.Handle("POST /api/user", php.For("api/user.php")) // Example: Allow POST too
+	mux.Handle("GET /api/items", php.For("api/items.php"))
+	mux.Handle("POST /api/items", php.For("api/items.php")) // Example: Allow POST too
 
 	// --- Register Go Handlers ---
 	// Explicitly register methods to avoid conflict with "GET /"

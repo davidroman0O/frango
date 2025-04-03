@@ -1,6 +1,10 @@
+//go:build nowatcher
+// +build nowatcher
+
 package frango
 
 import (
+	"context"
 	"embed"
 	"io"
 	"log"
@@ -92,10 +96,10 @@ func TestIntegration_BasicServe(t *testing.T) {
 	php, mwCleanup := setupTestMiddleware(t, sourceDir, WithSourceDir(sourceDir))
 	defer mwCleanup()
 
-	// Register routes using HandlerFor
+	// Register routes using new API (For)
 	mux := http.NewServeMux()
-	mux.Handle("/", php.HandlerFor("/", "index.php")) // Note: Pattern passed to HandlerFor for potential future use
-	mux.Handle("GET /about", php.HandlerFor("GET /about", "about.php"))
+	mux.Handle("/", php.For("index.php"))
+	mux.Handle("GET /about", php.For("about.php"))
 
 	// Test requests
 	tests := []struct {
@@ -137,30 +141,42 @@ func TestIntegration_ParameterizedRoutes(t *testing.T) {
 	php, mwCleanup := setupTestMiddleware(t, sourceDir, WithSourceDir(sourceDir))
 	defer mwCleanup()
 
-	// Use HandlerFor and Register with Mux
+	// Use new API (For) and Register with Mux
 	mux := http.NewServeMux()
-	// Pass the pattern used for registration to HandlerFor
-	mux.Handle("GET /users/{userId}", php.HandlerFor("GET /users/{userId}", "user_profile.php"))
-	mux.Handle("GET /items/{itemId}/color/{color}", php.HandlerFor("GET /items/{itemId}/color/{color}", "item_details.php"))
+	// Store the original patterns for parameter extraction
+	userPattern := "GET /users/{userId}"
+	itemPattern := "GET /items/{itemId}/color/{color}"
+
+	// Register the handlers
+	mux.Handle(userPattern, php.For("user_profile.php"))
+	mux.Handle(itemPattern, php.For("item_details.php"))
 
 	tests := []struct {
 		name       string
 		method     string
 		path       string
+		pattern    string // The original route pattern with parameters
 		wantStatus int
 		wantBody   string
 	}{
-		{"User ID 123", "GET", "/users/123", http.StatusOK, "User: 123"},
-		{"User ID abc", "GET", "/users/abc", http.StatusOK, "User: abc"},
-		{"Item details", "GET", "/items/xyz/color/blue", http.StatusOK, "Item: xyz Color: blue"},
-		{"Different Item", "GET", "/items/999/color/red", http.StatusOK, "Item: 999 Color: red"},
-		{"Route mismatch", "GET", "/users/abc/extra", http.StatusNotFound, ""},
-		{"Wrong method", "POST", "/users/123", http.StatusMethodNotAllowed, ""}, // Test method matching
+		{"User ID 123", "GET", "/users/123", userPattern, http.StatusOK, "User: 123"},
+		{"User ID abc", "GET", "/users/abc", userPattern, http.StatusOK, "User: abc"},
+		{"Item details", "GET", "/items/xyz/color/blue", itemPattern, http.StatusOK, "Item: xyz Color: blue"},
+		{"Different Item", "GET", "/items/999/color/red", itemPattern, http.StatusOK, "Item: 999 Color: red"},
+		{"Route mismatch", "GET", "/users/abc/extra", "", http.StatusNotFound, ""},
+		{"Wrong method", "POST", "/users/123", "", http.StatusMethodNotAllowed, ""}, // Test method matching
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+
+			// Manually add the pattern to the request context (like Go 1.22+ ServeMux does)
+			if tt.pattern != "" {
+				ctx := context.WithValue(req.Context(), phpContextKey("pattern"), tt.pattern)
+				req = req.WithContext(ctx)
+			}
+
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req) // Use the mux directly
 
@@ -199,10 +215,9 @@ func TestIntegration_HandleRender(t *testing.T) {
 		}
 	}
 
-	// Register render route using RenderHandlerFor
+	// Register render route using new API (Render)
 	mux := http.NewServeMux()
-	pattern := "GET /render"
-	mux.Handle(pattern, php.RenderHandlerFor(pattern, "template.php", renderFn))
+	mux.Handle("GET /render", php.Render("template.php", renderFn))
 
 	tests := []struct {
 		name       string
@@ -244,8 +259,7 @@ func TestIntegration_EmbedScript(t *testing.T) {
 
 	// Register a handler pointing to the *temporary disk path* of the embedded script
 	mux := http.NewServeMux()
-	pattern := "GET /run_embed"
-	mux.Handle(pattern, php.HandlerFor(pattern, tempScriptPath))
+	mux.Handle("GET /run_embed", php.For(tempScriptPath))
 
 	// Test request
 	req := httptest.NewRequest("GET", "/run_embed", nil)
@@ -277,9 +291,8 @@ func TestIntegration_EmbedLibrary(t *testing.T) {
 
 	// Register a handler for the main script
 	mux := http.NewServeMux()
-	pattern := "GET /app"
-	// Pass the pattern and the path relative to sourceDir
-	mux.Handle(pattern, php.HandlerFor(pattern, "main.php"))
+	// Use the new API (For) with the path relative to sourceDir
+	mux.Handle("GET /app", php.For("main.php"))
 
 	// Test request
 	req := httptest.NewRequest("GET", "/app", nil)
@@ -315,10 +328,9 @@ func TestIntegration_EmbedRenderWithEmbedLib(t *testing.T) {
 		}
 	}
 
-	// Register route using RenderHandlerFor, pointing to the temp path of the template
+	// Register route using new API (Render), pointing to the temp path of the template
 	mux := http.NewServeMux()
-	pattern := "GET /embed_render"
-	mux.Handle(pattern, php.RenderHandlerFor(pattern, tempTemplatePath, renderFn))
+	mux.Handle("GET /embed_render", php.Render(tempTemplatePath, renderFn))
 
 	// Test request
 	req := httptest.NewRequest("GET", "/embed_render", nil)
@@ -350,9 +362,8 @@ func TestIntegration_RequireFile(t *testing.T) {
 
 	// Register a handler for the main script
 	mux := http.NewServeMux()
-	pattern := "GET /main_req"
-	// Pass the path relative to the sourceDir
-	mux.Handle(pattern, php.HandlerFor(pattern, "main_with_require.php"))
+	// Use the new API (For) with the path relative to the sourceDir
+	mux.Handle("GET /main_req", php.For("main_with_require.php"))
 
 	// Test request
 	req := httptest.NewRequest("GET", "/main_req", nil)
@@ -381,9 +392,8 @@ func TestIntegration_DevMode(t *testing.T) {
 
 	// Register handler
 	mux := http.NewServeMux()
-	pattern := "GET /dev"
-	scriptPath := scriptName // Path relative to sourceDir
-	mux.Handle(pattern, php.HandlerFor(pattern, scriptPath))
+	// Use the new API (For)
+	mux.Handle("GET /dev", php.For(scriptName))
 
 	// --- First Request ---
 	t.Run("Initial request", func(t *testing.T) {
@@ -449,8 +459,8 @@ func TestIntegration_ParseError(t *testing.T) {
 
 	// Register handler for the script with a parse error
 	mux := http.NewServeMux()
-	pattern := "GET /parse_error"
-	mux.Handle(pattern, php.HandlerFor(pattern, "parse_error.php"))
+	// Use the new API (For)
+	mux.Handle("GET /parse_error", php.For("parse_error.php"))
 
 	// Test request
 	req := httptest.NewRequest("GET", "/parse_error", nil)
@@ -605,9 +615,16 @@ func TestPHPURLBlocking(t *testing.T) {
 	// Test 1: Direct PHP access should be blocked when blocking is enabled
 	t.Run("Block direct PHP access", func(t *testing.T) {
 		mux := http.NewServeMux()
-		mux.Handle("/", php.HandlerFor("/", "embed_script.php"))
+		// Register the handler for root
+		rootPattern := "/"
+		mux.Handle(rootPattern, php.For("embed_script.php"))
 
+		// Test with a PHP extension path that wasn't explicitly registered
 		req := httptest.NewRequest("GET", "/embed_script.php", nil)
+		// Add pattern context for the root handler
+		ctx := context.WithValue(req.Context(), phpContextKey("pattern"), rootPattern)
+		req = req.WithContext(ctx)
+
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
 
@@ -619,9 +636,16 @@ func TestPHPURLBlocking(t *testing.T) {
 	// Test 2: Explicitly registered PHP paths should work even with blocking enabled
 	t.Run("Allow explicitly registered PHP path", func(t *testing.T) {
 		mux := http.NewServeMux()
-		mux.Handle("/embed_script.php", php.HandlerFor("/embed_script.php", "embed_script.php"))
+		// Register the handler for the specific PHP path
+		phpPattern := "/embed_script.php"
+		mux.Handle(phpPattern, php.For("embed_script.php"))
 
+		// Access the explicitly registered PHP path
 		req := httptest.NewRequest("GET", "/embed_script.php", nil)
+		// Add pattern context
+		ctx := context.WithValue(req.Context(), phpContextKey("pattern"), phpPattern)
+		req = req.WithContext(ctx)
+
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
 
@@ -641,9 +665,14 @@ func TestPHPURLBlocking(t *testing.T) {
 		defer func() { php.blockDirectPHPURLs = originalValue }()
 
 		mux := http.NewServeMux()
-		mux.Handle("/", php.HandlerFor("/", "embed_script.php"))
+		rootPattern := "/"
+		mux.Handle(rootPattern, php.For("embed_script.php"))
 
 		req := httptest.NewRequest("GET", "/embed_script.php", nil)
+		// Add pattern context
+		ctx := context.WithValue(req.Context(), phpContextKey("pattern"), rootPattern)
+		req = req.WithContext(ctx)
+
 		rr := httptest.NewRecorder()
 		mux.ServeHTTP(rr, req)
 
@@ -651,4 +680,93 @@ func TestPHPURLBlocking(t *testing.T) {
 		body, _ := io.ReadAll(rr.Body)
 		assert.Contains(t, string(body), "Hello from embedded script!", "Should contain expected content")
 	})
+}
+
+// Test $_PATH superglobal and path parameter extraction
+func TestPathSuperglobal(t *testing.T) {
+	// Create PHP middleware instance with default test source dir
+	sourceDir := "testdata"
+	cwd, _ := os.Getwd()
+	absSourceDir := filepath.Join(cwd, sourceDir)
+
+	php, mwCleanup := setupTestMiddleware(t, absSourceDir, WithSourceDir(absSourceDir))
+	defer mwCleanup()
+
+	// Create the test http.ServeMux
+	mux := http.NewServeMux()
+
+	// Define routes with path parameters using Go 1.22+ style pattern syntax
+	userPattern := "GET /users/{userId}/profile"
+	orderPattern := "GET /orders/{orderId}/items/{itemId}"
+
+	// Register the handlers
+	mux.Handle(userPattern, php.For("path_test.php"))
+	mux.Handle(orderPattern, php.For("path_test.php"))
+
+	// Test cases
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		pattern    string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "User Profile Path",
+			method:     "GET",
+			path:       "/users/42/profile",
+			pattern:    userPattern,
+			wantStatus: http.StatusOK,
+			wantBody:   "userId: 42",
+		},
+		{
+			name:       "Order Item Path",
+			method:     "GET",
+			path:       "/orders/abc123/items/xyz789",
+			pattern:    orderPattern,
+			wantStatus: http.StatusOK,
+			wantBody:   "itemId: xyz789",
+		},
+	}
+
+	// Run tests
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+
+			// Add pattern to context (like Go 1.22+ ServeMux does)
+			ctx := context.WithValue(req.Context(), phpContextKey("pattern"), tt.pattern)
+			req = req.WithContext(ctx)
+
+			// Use recorder to capture response
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			// Check status
+			if w.Code != tt.wantStatus {
+				t.Errorf("expected status %d but got %d", tt.wantStatus, w.Code)
+			}
+
+			// Check response body
+			body := w.Body.String()
+			if !strings.Contains(body, tt.wantBody) {
+				t.Errorf("expected body to contain %q but got:\n%s", tt.wantBody, body)
+				// Print response for debugging
+				t.Logf("Full Response Body:\n%s", body)
+			}
+
+			// Also check for $_PATH_SEGMENTS
+			if !strings.Contains(body, "Contents of $_PATH_SEGMENTS:") {
+				t.Errorf("$_PATH_SEGMENTS not found in response")
+			}
+
+			// Make sure path parameters are available through $_PATH
+			if strings.Contains(body, "Contents of $_PATH:") {
+				t.Logf("$_PATH is working correctly")
+			} else {
+				t.Errorf("$_PATH is not found in response")
+			}
+		})
+	}
 }

@@ -26,12 +26,12 @@ func main() {
 	// Create mux and register PHP handlers
 	mux := http.NewServeMux()
 
-	// Register the Redis API endpoint
+	// Register the Redis API endpoint using the new For method
 	// Assuming it handles relevant methods (GET/POST etc)
-	mux.Handle("/api/redis", php.HandlerFor("/api/redis", "api.php"))
+	mux.Handle("/api/redis", php.For("api.php"))
 
 	// Register the root endpoint (index.php)
-	mux.Handle("/", php.HandlerFor("/", "index.php"))
+	mux.Handle("/", php.For("index.php"))
 
 	// Setup graceful shutdown
 	go func() {

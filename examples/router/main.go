@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -222,14 +223,35 @@ func main() {
 			"flash_messages": messages,
 		}
 	}
-	// Use RenderHandlerFor for index page to pass messages
-	mux.Handle("GET /", php.RenderHandlerFor("GET /", "index.php", indexRenderFn))
+	// Use Render method for index page to pass messages
+	mux.Handle("GET /", php.Render("index.php", indexRenderFn))
 
-	// Use parameterized paths for detail/edit views
-	mux.Handle("GET /users/{id}", php.HandlerFor("GET /users/{id}", "user_detail.php"))
-	mux.Handle("GET /items/{id}", php.HandlerFor("GET /items/{id}", "item_detail.php"))
-	mux.Handle("GET /users/{id}/edit", php.HandlerFor("GET /users/{id}/edit", "user_edit.php"))
-	mux.Handle("POST /users/{id}/edit", php.HandlerFor("POST /users/{id}/edit", "user_edit.php")) // Assumes user_edit handles POST for updates
+	// Use parameterized paths for detail/edit views with the new For method
+	mux.Handle("GET /users/{id}", php.For("user_detail.php"))
+	mux.Handle("GET /items/{id}", php.For("item_detail.php"))
+	mux.Handle("GET /users/{id}/edit", php.For("user_edit.php"))
+	mux.Handle("POST /users/{id}/edit", php.For("user_edit.php")) // Standard form submission
+
+	// Additional debug wrapper for parameterized routes to ensure pattern is available
+	// Wrap the item handler to ensure the pattern is set in context
+	itemDetailPattern := "GET /items/{id}"
+	mux.Handle("GET /items-debug/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Create a new context with pattern explicitly set
+		type patternKey string
+		ctx := context.WithValue(r.Context(), patternKey("pattern"), itemDetailPattern)
+		// Call the handler with modified request
+		php.For("item_detail.php").ServeHTTP(w, r.WithContext(ctx))
+	}))
+
+	// Wrap the user detail handler to ensure the pattern is set in context
+	userDetailPattern := "GET /users/{id}"
+	mux.Handle("GET /users-debug/{id}", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Create a new context with pattern explicitly set
+		type patternKey string
+		ctx := context.WithValue(r.Context(), patternKey("pattern"), userDetailPattern)
+		// Call the handler with modified request
+		php.For("user_detail.php").ServeHTTP(w, r.WithContext(ctx))
+	}))
 
 	// --- Register Embedded Rendered Dashboard ---
 	dashboardRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
@@ -271,9 +293,8 @@ func main() {
 	// Add the embedded template file first
 	tempDashboardPath, err := php.AddEmbeddedLibrary(dashboardTemplate, "embedded-php/dashboard.php", "/dashboard.php")
 	assertNoError(err, "Add dashboard.php template")
-	// Register the handler using the temp path
-	dashboardPattern := "GET /dashboard"
-	mux.Handle(dashboardPattern, php.RenderHandlerFor(dashboardPattern, tempDashboardPath, dashboardRenderFn))
+	// Register the handler using the temp path with the new Render method
+	mux.Handle("GET /dashboard", php.Render(tempDashboardPath, dashboardRenderFn))
 
 	// Setup graceful shutdown
 	go func() {
@@ -285,11 +306,18 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// Log all requests for debugging
+	wrappedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("REQUEST: %s %s", r.Method, r.URL.Path)
+		log.Printf("  Headers: %v", r.Header)
+		mux.ServeHTTP(w, r)
+	})
+
 	// Start the server with the single combined mux
 	log.Printf("Router Example running on port %s", *port)
 	log.Printf("Using web directory: %s", php.SourceDir())
 	log.Printf("Open http://localhost:%s/ in your browser", *port)
-	if err := http.ListenAndServe(":"+*port, mux); err != nil {
+	if err := http.ListenAndServe(":"+*port, wrappedMux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -428,114 +456,170 @@ func registerUserEndpoints(mux *http.ServeMux, memStore *MemoryStore) {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	// GET /api/users/{id} - Get user by ID
+	// GET /api/users/{id} - Get a specific user
 	mux.HandleFunc("GET /api/users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// Get user ID from URL
-		idStr := r.PathValue("id")
-		id, err := strconv.Atoi(idStr)
+		// Extract user ID from path
+		userIdStr := r.PathValue("id")
+		userId, err := strconv.Atoi(userIdStr)
 		if err != nil {
-			http.Error(w, "Invalid user ID", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Invalid user ID format",
+			})
 			return
 		}
 
 		// Get users from store
 		usersVal := memStore.GetValue("users")
+		if usersVal == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Users data not found",
+			})
+			return
+		}
+
 		users := usersVal.([]map[string]interface{})
 
-		// Find user by ID
-		var foundUser map[string]interface{}
-		for _, user := range users {
-			if userID, ok := user["id"].(int); ok && userID == id {
-				foundUser = user
+		// Find the user by ID
+		var user map[string]interface{}
+		for _, u := range users {
+			if uid, ok := u["id"].(int); ok && uid == userId {
+				user = u
 				break
 			}
 		}
 
-		if foundUser == nil {
-			http.Error(w, "User not found", http.StatusNotFound)
+		if user == nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "User not found",
+			})
 			return
 		}
 
-		// Return user
+		// Return the user
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"user":      user,
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
+	})
+
+	// PUT /api/users/{id} - Update a user
+	mux.HandleFunc("PUT /api/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Extract user ID from path
+		userIdStr := r.PathValue("id")
+		userId, err := strconv.Atoi(userIdStr)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Invalid user ID format",
+			})
+			return
+		}
+
+		// Read the entire request body
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Failed to read request body: " + err.Error(),
+			})
+			return
+		}
+		// Log the raw request
+		log.Printf("Raw PUT request body for user %d: %s", userId, string(bodyBytes))
+
+		// Parse the JSON body
+		var requestBody map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &requestBody); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Invalid JSON body: " + err.Error(),
+			})
+			return
+		}
+
+		// Get users from store
+		usersVal := memStore.GetValue("users")
+		if usersVal == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Users data not found",
+			})
+			return
+		}
+
+		users := usersVal.([]map[string]interface{})
+
+		// Find and update the user by ID
+		var updatedUser map[string]interface{}
+		updated := false
+
+		for i, user := range users {
+			var uid int
+			// Handle both int and float64 IDs (JSON unmarshalling might produce float64)
+			switch v := user["id"].(type) {
+			case int:
+				uid = v
+			case float64:
+				uid = int(v)
+			default:
+				continue // Skip if ID is not a number
+			}
+
+			if uid == userId {
+				// Update fields from request
+				if name, ok := requestBody["name"].(string); ok && name != "" {
+					users[i]["name"] = name
+				}
+				if email, ok := requestBody["email"].(string); ok && email != "" {
+					users[i]["email"] = email
+				}
+				if role, ok := requestBody["role"].(string); ok && role != "" {
+					users[i]["role"] = role
+				}
+
+				users[i]["updated_at"] = time.Now().Format(time.RFC3339)
+				updatedUser = users[i]
+				updated = true
+				break
+			}
+		}
+
+		if !updated {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "User not found",
+			})
+			return
+		}
+
+		// Save updated users back to store
+		memStore.SetValue("users", users)
+
+		// Add success message to the store
+		memStore.AddMessage(MessageTypeSuccess, "User updated successfully")
+
+		// Return the updated user
 		response := map[string]interface{}{
-			"user":      foundUser,
+			"user":      updatedUser,
 			"timestamp": time.Now().Format(time.RFC3339),
 		}
 
-		json.NewEncoder(w).Encode(response)
-	})
+		// Log the response
+		responseBytes, _ := json.Marshal(response)
+		log.Printf("Response to PUT for user %d: %s", userId, string(responseBytes))
 
-	// PUT /api/users/{id} - Update user
-	mux.HandleFunc("PUT /api/users/{id}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-
-		// Get user ID from URL
-		idStr := r.PathValue("id")
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			http.Error(w, "Invalid user ID", http.StatusBadRequest)
-			return
-		}
-
-		// Read request body
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Error reading request body", http.StatusBadRequest)
-			return
-		}
-
-		// Parse JSON
-		var input map[string]interface{}
-		if err := json.Unmarshal(body, &input); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-
-		// Get users from store
-		usersVal := memStore.GetValue("users")
-		users := usersVal.([]map[string]interface{})
-
-		// Find user by ID
-		var foundUser map[string]interface{}
-		var userIndex int
-		for i, user := range users {
-			if userID, ok := user["id"].(int); ok && userID == id {
-				foundUser = user
-				userIndex = i
-				break
-			}
-		}
-
-		if foundUser == nil {
-			http.Error(w, "User not found", http.StatusNotFound)
-			return
-		}
-
-		// Update user fields
-		if name, ok := input["name"].(string); ok {
-			foundUser["name"] = name
-		}
-		if email, ok := input["email"].(string); ok {
-			foundUser["email"] = email
-		}
-		if role, ok := input["role"].(string); ok {
-			foundUser["role"] = role
-		}
-		foundUser["updated_at"] = time.Now().Format(time.RFC3339)
-
-		// Update store
-		users[userIndex] = foundUser
-		memStore.SetValue("users", users)
-
-		// Return updated user
-		response := map[string]interface{}{
-			"success": true,
-			"message": "User updated successfully",
-			"user":    foundUser,
-		}
-
+		// Send the response
+		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(response)
 	})
 
@@ -681,43 +765,55 @@ func registerItemEndpoints(mux *http.ServeMux, memStore *MemoryStore) {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	// GET /api/items/{id} - Get item by ID
+	// GET /api/items/{id} - Get a specific item
 	mux.HandleFunc("GET /api/items/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// Get item ID from URL
-		idStr := r.PathValue("id")
-		id, err := strconv.Atoi(idStr)
+		// Extract item ID from path
+		itemIdStr := r.PathValue("id")
+		itemId, err := strconv.Atoi(itemIdStr)
 		if err != nil {
-			http.Error(w, "Invalid item ID", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Invalid item ID format",
+			})
 			return
 		}
 
 		// Get items from store
 		itemsVal := memStore.GetValue("items")
+		if itemsVal == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Items data not found",
+			})
+			return
+		}
+
 		items := itemsVal.([]map[string]interface{})
 
-		// Find item by ID
-		var foundItem map[string]interface{}
-		for _, item := range items {
-			if itemID, ok := item["id"].(int); ok && itemID == id {
-				foundItem = item
+		// Find the item by ID
+		var item map[string]interface{}
+		for _, i := range items {
+			if iid, ok := i["id"].(int); ok && iid == itemId {
+				item = i
 				break
 			}
 		}
 
-		if foundItem == nil {
-			http.Error(w, "Item not found", http.StatusNotFound)
+		if item == nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Item not found",
+			})
 			return
 		}
 
-		// Return item
-		response := map[string]interface{}{
-			"item":      foundItem,
+		// Return the item
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"item":      item,
 			"timestamp": time.Now().Format(time.RFC3339),
-		}
-
-		json.NewEncoder(w).Encode(response)
+		})
 	})
 }
 

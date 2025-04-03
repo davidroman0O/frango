@@ -1,9 +1,33 @@
 <?php
-$userId = $_SERVER['FRANGO_PARAM_id'] ?? null;
+// Get the user ID from URL segment (users/123 -> segment 1 is "123")
+$userId = $_SERVER['FRANGO_URL_SEGMENT_1'] ?? null;
 if (!$userId) { die("User ID required."); }
+
+// Debug info
+$debug = "URL Segments: ";
+for ($i = 0; $i < ($_SERVER['FRANGO_URL_SEGMENT_COUNT'] ?? 0); $i++) {
+    $debug .= "[$i]=" . ($_SERVER["FRANGO_URL_SEGMENT_$i"] ?? 'none') . " ";
+}
+
+// Get user data from API
 $apiUrl = "http://localhost:" . ($_SERVER["SERVER_PORT"] ?? 8082) . "/api/users/" . $userId;
+
+// Add debug information about the API call
+$apiDebug = "API URL: " . $apiUrl . "\n";
+
+// Make API request with better error handling
 $userDataJson = @file_get_contents($apiUrl);
-$userData = json_decode($userDataJson, true);
+$apiDebug .= "API Response Success: " . ($userDataJson !== false ? "Yes" : "No") . "\n";
+
+if ($userDataJson === false) {
+    $apiDebug .= "Error: " . error_get_last()['message'] . "\n";
+    $userData = null;
+} else {
+    // Parse the response
+    $userData = json_decode($userDataJson, true);
+    $apiDebug .= "JSON Decode Result: " . (json_last_error() === JSON_ERROR_NONE ? "Success" : json_last_error_msg()) . "\n";
+    $apiDebug .= "Result contains 'user': " . (isset($userData['user']) ? "Yes" : "No") . "\n";
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -195,5 +219,13 @@ $userData = json_decode($userDataJson, true);
             </div>
         </div>
     <?php endif; ?>
+    
+    <!-- Debug info -->
+    <div style="margin-top: 30px; padding: 15px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 5px; font-family: monospace; font-size: 12px;">
+        <h3>Debug Information</h3>
+        <p><?= htmlspecialchars($debug ?? '') ?></p>
+        <p>Raw URL Path: <?= htmlspecialchars($_SERVER['FRANGO_URL_PATH'] ?? 'not available') ?></p>
+        <p><?= htmlspecialchars($apiDebug ?? '') ?></p>
+    </div>
 </body>
 </html>

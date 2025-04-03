@@ -90,9 +90,9 @@ func main() {
 	// Register the root handler explicitly if needed
 	// Check if index.php exists in the absolute web dir
 	if _, err := os.Stat(filepath.Join(absWebDir, "index.php")); err == nil {
-		// HandlerFor needs path relative to SourceDir, which is absWebDir here.
+		// For needs path relative to SourceDir, which is absWebDir here.
 		// So, just pass "index.php"
-		mux.Handle("/", php.HandlerFor("/", "index.php"))
+		mux.Handle("/", php.For("index.php"))
 	} else {
 		log.Println("Root index.php not found in web directory.")
 	}

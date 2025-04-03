@@ -73,12 +73,11 @@ func main() {
 		return data
 	}
 
-	// Create mux and register route using RenderHandlerFor
+	// Create mux and register route using the new Render method
 	mux := http.NewServeMux()
 	// Pattern includes method for Go 1.22+ mux
-	pattern := "GET /"
 	scriptPath := "template.php" // Relative to sourceDir
-	mux.Handle(pattern, php.RenderHandlerFor(pattern, scriptPath, renderFn))
+	mux.Handle("GET /", php.Render(scriptPath, renderFn))
 
 	// Setup graceful shutdown
 	go func() {

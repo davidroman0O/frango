@@ -34,32 +34,29 @@ func main() {
 	// Create a standard HTTP mux
 	mux := http.NewServeMux()
 
-	// --- Register PHP Handlers using HandlerFor ---
-	// Note: Pass the pattern used for mux registration to HandlerFor
-	//       so it can extract parameter names if needed.
+	// --- Register PHP Handlers using the new For method ---
+	// Now we only need to specify the pattern once - eliminating duplication
 
 	// Standard endpoints (METHOD defaults to ANY if not specified)
-	mux.Handle("/api/user", php.HandlerFor("/api/user", "api/user.php"))
-	mux.Handle("/api/items", php.HandlerFor("/api/items", "api/items.php"))
+	mux.Handle("/api/user", php.For("api/user.php"))
+	mux.Handle("/api/items", php.For("api/items.php"))
 
 	// Alias for the same file
-	mux.Handle("/api/users", php.HandlerFor("/api/users", "api/user.php"))
+	mux.Handle("/api/users", php.For("api/user.php"))
 
 	// Clean URL without .php (Requires Go 1.22+ mux for good matching)
-	mux.Handle("/about", php.HandlerFor("/about", "about.php"))
+	mux.Handle("/about", php.For("about.php"))
 	// Traditional URL with .php
-	mux.Handle("/about.php", php.HandlerFor("/about.php", "about.php"))
+	mux.Handle("/about.php", php.For("about.php"))
 
 	// Root maps to index.php
-	mux.Handle("/", php.HandlerFor("/", "index.php"))
+	mux.Handle("/", php.For("index.php"))
 
 	// --- Register Go Handlers ---
 	mux.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"time": "` + time.Now().Format(time.RFC3339) + `"}`))
 	})
-
-	// REMOVED old php.Wrap or direct mounting of php middleware
 
 	// Setup graceful shutdown
 	go func() {

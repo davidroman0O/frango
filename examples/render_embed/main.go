@@ -81,11 +81,10 @@ func main() {
 		return data
 	}
 
-	// Create mux and register route using RenderHandlerFor
+	// Create mux and register route using the new Render method
 	mux := http.NewServeMux()
-	pattern := "GET /" // Serve at root
 	// Use the temporary disk path returned by AddEmbeddedLibrary
-	mux.Handle(pattern, php.RenderHandlerFor(pattern, templateDiskPath, renderFn))
+	mux.Handle("GET /", php.Render(templateDiskPath, renderFn))
 
 	// Setup graceful shutdown
 	go func() {

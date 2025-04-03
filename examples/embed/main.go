@@ -54,15 +54,16 @@ func main() {
 
 	// --- Register PHP Handlers ---
 	// Register routes pointing to the temporary paths of the embedded files.
-	mux.Handle("/", php.HandlerFor("/", tempIndexPath))
-	mux.Handle("/index", php.HandlerFor("/index", tempIndexPath)) // Clean URL
-	mux.Handle("/index.php", php.HandlerFor("/index.php", tempIndexPath))
+	// New API eliminates the duplicated pattern
+	mux.Handle("/", php.For(tempIndexPath))
+	mux.Handle("/index", php.For(tempIndexPath)) // Clean URL
+	mux.Handle("/index.php", php.For(tempIndexPath))
 
-	mux.Handle("/api/user", php.HandlerFor("/api/user", tempUserPath))
-	mux.Handle("/api/user.php", php.HandlerFor("/api/user.php", tempUserPath))
+	mux.Handle("/api/user", php.For(tempUserPath))
+	mux.Handle("/api/user.php", php.For(tempUserPath))
 
-	mux.Handle("/api/items", php.HandlerFor("/api/items", tempItemsPath))
-	mux.Handle("/api/items.php", php.HandlerFor("/api/items.php", tempItemsPath))
+	mux.Handle("/api/items", php.For(tempItemsPath))
+	mux.Handle("/api/items.php", php.For(tempItemsPath))
 
 	// --- Register Go Handlers ---
 	mux.HandleFunc("/api/time", func(w http.ResponseWriter, r *http.Request) {
