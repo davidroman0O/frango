@@ -1,4 +1,108 @@
-# Frango - PHP Middleware for Go
+# Frango - Enhanced Virtual Filesystem and Router
+
+This implementation enhances Frango with a powerful Virtual Filesystem (VFS) and Conventional Router for Go and PHP integration.
+
+## Virtual Filesystem Features
+
+The enhanced Virtual Filesystem provides:
+
+- **Multiple Source Types**:
+  - Physical filesystem files via `AddSourceFile` and `AddSourceDirectory`
+  - Embedded files via `AddEmbeddedFile` and `AddEmbeddedDirectory`
+  - Virtual files created at runtime via `CreateVirtualFile`
+
+- **File Operations**:
+  - Copy files with `CopyFile`
+  - Move files with `MoveFile`
+  - Delete files with `DeleteFile`
+  - Access file content with `GetFileContent`
+  - List all files with `ListFiles`
+
+- **Automatic File Watching**:
+  - Watches source files for changes and auto-reloads
+  - Uses a centralized mechanism in the middleware
+  - Each VFS instance maintains its own file tracking
+
+- **Origin Tracking**:
+  - Keeps track of file origins (source, embed, virtual)
+  - Prioritizes access based on origin type
+
+## Conventional Router
+
+The Conventional Router combines Go and PHP endpoints:
+
+- **Multiple Route Types**:
+  - PHP endpoints via the Virtual Filesystem
+  - Go HTTP handlers via `AddGoHandler`
+  - Static assets automatically detected and served
+
+- **Routing Conventions**:
+  - Clean URLs without `.php` extension
+  - Method detection via file extensions (e.g., `users.get.php` → `GET /users`)
+  - Index files for directory paths (e.g., `users/index.php` → `/users/`)
+  - Parameter extraction from URL paths
+
+- **Configuration Options**:
+  - Control URL cleaning, case sensitivity, method detection, etc.
+  - Custom parameter pattern syntax
+  - Static file extension configuration
+
+## Example Usage
+
+```go
+// Create Frango middleware
+php, _ := frango.New(frango.WithSourceDir("./web"))
+defer php.Shutdown()
+
+// Create virtual filesystem
+vfs := php.NewFS()
+
+// Add physical files
+vfs.AddSourceDirectory("./web/pages", "/pages")
+
+// Add embedded files
+vfs.AddEmbeddedDirectory(embeddedFiles, "templates", "/templates")
+
+// Create virtual files at runtime
+vfs.CreateVirtualFile("/config/app.php", []byte(`<?php $config = ['debug' => true]; ?>`))
+
+// Create a conventional router
+router := php.NewConventionalRouter(nil)  // Use default options
+
+// Register VFS endpoints
+router.RegisterVirtualFSEndpoints(vfs, "/")
+
+// Add pure Go endpoints
+router.AddGoHandler("/status", "GET", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    w.Write([]byte(`{"status":"ok"}`))
+}))
+
+// Start the server
+http.ListenAndServe(":8080", router.Handler())
+```
+
+## Benefits
+
+1. **Simplified Development**: Easily combine PHP and Go within the same application
+2. **Flexible Content Sources**: Mix physical files, embedded resources, and dynamic content
+3. **Convention over Configuration**: Define routes based on filesystem structure
+4. **Developer Experience**: Auto-reload on file changes for fast development cycle
+5. **Production Ready**: Embedded files for single binary deployment
+
+## Running the Example
+
+```bash
+# Navigate to the example directory
+cd examples/virtual_fs
+
+# Run the example
+go run main.go
+
+# Visit http://localhost:8080 in your browser
+```
+
+## Frango - PHP Middleware for Go
 
 Frango is a focused, framework-agnostic middleware that integrates PHP into any Go HTTP server using [FrankenPHP](https://github.com/dunglas/frankenphp).
 

@@ -489,7 +489,8 @@ func TestIntegration_MapFileSystemRoutes(t *testing.T) {
 		"admin/settings.php": `<?php echo "Admin Settings"; ?>`,
 	}
 	sourceDir, _ := setupTestEnv(t, files)
-	php, mwCleanup := setupTestMiddleware(t, sourceDir, WithSourceDir(sourceDir))
+	// Disable direct PHP URL blocking for this test
+	php, mwCleanup := setupTestMiddleware(t, sourceDir, WithSourceDir(sourceDir), WithDirectPHPURLsBlocking(false))
 	defer mwCleanup()
 
 	// --- Generate Routes with different options ---

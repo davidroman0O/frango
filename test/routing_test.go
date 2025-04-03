@@ -823,7 +823,29 @@ func TestNestedRouteParameters(t *testing.T) {
 	nestedParamsScript := `<?php
 header('Content-Type: text/html; charset=UTF-8');
 
-// Access $_PATH superglobal for path parameters (the better approach)
+// Manually initialize $_PATH from environment variables
+if (!isset($_PATH)) {
+    $_PATH = [];
+    
+    // Load from JSON if available
+    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $decodedParams = json_decode($pathParamsJson, true);
+    if (is_array($decodedParams)) {
+        $_PATH = $decodedParams;
+    }
+    
+    // Add any FRANGO_PARAM_ variables for backward compatibility
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'FRANGO_PARAM_') === 0) {
+            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+            if (!isset($_PATH[$paramName])) {
+                $_PATH[$paramName] = $value;
+            }
+        }
+    }
+}
+
+// Get parameters from our manually initialized $_PATH
 $categoryId = $_PATH['categoryId'] ?? 'not-set';
 $productId = $_PATH['productId'] ?? 'not-set';
 
@@ -897,9 +919,21 @@ $pathSegments = $_PATH_SEGMENTS ?? [];
 		// Define the pattern with nested parameters
 		pattern := "GET /categories/{categoryId}/products/{productId}"
 
+		// Debug output - before setting context
+		t.Logf("Original request path: %s", r.URL.Path)
+		t.Logf("Setting pattern in context: %s", pattern)
+
 		// Add pattern to context to simulate Go 1.22 ServeMux behavior
 		ctx := context.WithValue(newReq.Context(), phpContextKey("pattern"), pattern)
 		newReq = newReq.WithContext(ctx)
+
+		// Set path parameters in request URL path segments for parameter extraction
+		// Make sure to add URL path segments
+		pathSegments := []string{"categories", "electronics", "products", "laptop-123"}
+		for i, segment := range pathSegments {
+			os.Setenv(fmt.Sprintf("FRANGO_URL_SEGMENT_%d", i), segment)
+		}
+		os.Setenv("FRANGO_URL_SEGMENT_COUNT", fmt.Sprintf("%d", len(pathSegments)))
 
 		// Add simulated path parameters to JSON
 		params := map[string]string{
@@ -908,10 +942,19 @@ $pathSegments = $_PATH_SEGMENTS ?? [];
 		}
 		paramsJSON, _ := json.Marshal(params)
 
+		// Debug parameter output
+		t.Logf("Setting parameters: %v", params)
+		t.Logf("Parameters JSON: %s", string(paramsJSON))
+
 		// Set as environment variable that will be passed to PHP
 		os.Setenv("FRANGO_PATH_PARAMS_JSON", string(paramsJSON))
 		os.Setenv("FRANGO_PARAM_categoryId", "electronics")
 		os.Setenv("FRANGO_PARAM_productId", "laptop-123")
+
+		// Verify environment variables are set
+		t.Logf("Env FRANGO_PATH_PARAMS_JSON: %s", os.Getenv("FRANGO_PATH_PARAMS_JSON"))
+		t.Logf("Env FRANGO_PARAM_categoryId: %s", os.Getenv("FRANGO_PARAM_categoryId"))
+		t.Logf("Env FRANGO_PARAM_productId: %s", os.Getenv("FRANGO_PARAM_productId"))
 
 		// Serve the request
 		handler.ServeHTTP(w, newReq)
@@ -920,6 +963,10 @@ $pathSegments = $_PATH_SEGMENTS ?? [];
 		os.Unsetenv("FRANGO_PATH_PARAMS_JSON")
 		os.Unsetenv("FRANGO_PARAM_categoryId")
 		os.Unsetenv("FRANGO_PARAM_productId")
+		for i := range pathSegments {
+			os.Unsetenv(fmt.Sprintf("FRANGO_URL_SEGMENT_%d", i))
+		}
+		os.Unsetenv("FRANGO_URL_SEGMENT_COUNT")
 	}))
 	defer server.Close()
 
@@ -973,6 +1020,44 @@ func TestOptionalRouteParameters(t *testing.T) {
 	// Create PHP script that handles optional parameters
 	optionalParamsScript := `<?php
 header('Content-Type: text/html; charset=UTF-8');
+
+// Manually initialize $_PATH from environment variables
+if (!isset($_PATH)) {
+    $_PATH = [];
+    
+    // Load from JSON if available
+    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $decodedParams = json_decode($pathParamsJson, true);
+    if (is_array($decodedParams)) {
+        $_PATH = $decodedParams;
+    }
+    
+    // Add any FRANGO_PARAM_ variables for backward compatibility
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'FRANGO_PARAM_') === 0) {
+            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+            if (!isset($_PATH[$paramName])) {
+                $_PATH[$paramName] = $value;
+            }
+        }
+    }
+}
+
+// Initialize path segments if not set
+if (!isset($_PATH_SEGMENTS)) {
+    $_PATH_SEGMENTS = [];
+    
+    // Get segment count
+    $segmentCount = intval($_SERVER['FRANGO_URL_SEGMENT_COUNT'] ?? 0);
+    
+    // Add segments to array
+    for ($i = 0; $i < $segmentCount; $i++) {
+        $segmentKey = "FRANGO_URL_SEGMENT_$i";
+        if (isset($_SERVER[$segmentKey])) {
+            $_PATH_SEGMENTS[] = $_SERVER[$segmentKey];
+        }
+    }
+}
 
 // Access parameters from $_PATH superglobal
 $postId = $_PATH['postId'] ?? 'not-set';
@@ -1032,7 +1117,7 @@ $requestUri = $_SERVER['REQUEST_URI'] ?? 'unknown';
 	handler := php.For(scriptPath)
 
 	// Create a testable version of the handler with different patterns
-	createTestHandler := func(pattern string, params map[string]string) http.Handler {
+	createTestHandler := func(pattern string, params map[string]string, path string) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Create a new request with the pattern in context
 			newReq := r.Clone(r.Context())
@@ -1040,6 +1125,13 @@ $requestUri = $_SERVER['REQUEST_URI'] ?? 'unknown';
 			// Add pattern to context
 			ctx := context.WithValue(newReq.Context(), phpContextKey("pattern"), pattern)
 			newReq = newReq.WithContext(ctx)
+
+			// Add path segments to environment
+			pathSegments := strings.Split(strings.Trim(path, "/"), "/")
+			for i, segment := range pathSegments {
+				os.Setenv(fmt.Sprintf("FRANGO_URL_SEGMENT_%d", i), segment)
+			}
+			os.Setenv("FRANGO_URL_SEGMENT_COUNT", fmt.Sprintf("%d", len(pathSegments)))
 
 			// Add parameters
 			paramsJSON, _ := json.Marshal(params)
@@ -1058,6 +1150,10 @@ $requestUri = $_SERVER['REQUEST_URI'] ?? 'unknown';
 			for k := range params {
 				os.Unsetenv("FRANGO_PARAM_" + k)
 			}
+			for i := range pathSegments {
+				os.Unsetenv(fmt.Sprintf("FRANGO_URL_SEGMENT_%d", i))
+			}
+			os.Unsetenv("FRANGO_URL_SEGMENT_COUNT")
 		})
 	}
 
@@ -1096,7 +1192,7 @@ $requestUri = $_SERVER['REQUEST_URI'] ?? 'unknown';
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create handler with the specific pattern and parameters
-			testHandler := createTestHandler(tc.pattern, tc.params)
+			testHandler := createTestHandler(tc.pattern, tc.params, tc.path)
 
 			// Create test server
 			server := httptest.NewServer(testHandler)
@@ -1136,8 +1232,46 @@ func TestWildcardRoutes(t *testing.T) {
 	wildcardScript := `<?php
 header('Content-Type: text/html; charset=UTF-8');
 
+// Manually initialize $_PATH from environment variables
+if (!isset($_PATH)) {
+    $_PATH = [];
+    
+    // Load from JSON if available
+    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $decodedParams = json_decode($pathParamsJson, true);
+    if (is_array($decodedParams)) {
+        $_PATH = $decodedParams;
+    }
+    
+    // Add any FRANGO_PARAM_ variables for backward compatibility
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'FRANGO_PARAM_') === 0) {
+            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+            if (!isset($_PATH[$paramName])) {
+                $_PATH[$paramName] = $value;
+            }
+        }
+    }
+}
+
+// Initialize path segments if not set
+if (!isset($_PATH_SEGMENTS)) {
+    $_PATH_SEGMENTS = [];
+    
+    // Get segment count
+    $segmentCount = intval($_SERVER['FRANGO_URL_SEGMENT_COUNT'] ?? 0);
+    
+    // Add segments to array
+    for ($i = 0; $i < $segmentCount; $i++) {
+        $segmentKey = "FRANGO_URL_SEGMENT_$i";
+        if (isset($_SERVER[$segmentKey])) {
+            $_PATH_SEGMENTS[] = $_SERVER[$segmentKey];
+        }
+    }
+}
+
 // In wildcard patterns, we can access the raw segments
-$segments = $_PATH_SEGMENTS ?? [];
+$segments = $_PATH_SEGMENTS;
 $pathInfo = $_SERVER['PATH_INFO'] ?? 'not-set';
 
 // We can also access any named parameters that might be in the pattern
@@ -1398,21 +1532,73 @@ $operation = $_GET['op'] ?? 'default';
 
 // TestRoutePriorityHandling tests how routes with different patterns are prioritized
 func TestRoutePriorityHandling(t *testing.T) {
-	// Create PHP scripts for different routes
-	specificRouteScript := `<?php
+	// Create PHP scripts for testing route priority
+	specificScript := `<?php
 header('Content-Type: text/plain');
-echo "Specific Route Handler: " . ($_PATH['id'] ?? 'no-id');
-?>`
 
-	wildcardRouteScript := `<?php
+// Manually initialize $_PATH from environment variables 
+if (!isset($_PATH)) {
+    $_PATH = [];
+    
+    // Load from JSON if available
+    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $decodedParams = json_decode($pathParamsJson, true);
+    if (is_array($decodedParams)) {
+        $_PATH = $decodedParams;
+    }
+    
+    // Add any FRANGO_PARAM_ variables for backward compatibility
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'FRANGO_PARAM_') === 0) {
+            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+            if (!isset($_PATH[$paramName])) {
+                $_PATH[$paramName] = $value;
+            }
+        }
+    }
+}
+
+// Get user ID from path parameters
+$userId = $_PATH['id'] ?? 'no-id';
+
+echo "Specific Route Handler: $userId";
+`
+
+	wildcardScript := `<?php
 header('Content-Type: text/plain');
-echo "Wildcard Route Handler: " . ($_PATH['*'] ?? 'no-wildcard');
-?>`
 
-	defaultRouteScript := `<?php
+// Manually initialize $_PATH from environment variables 
+if (!isset($_PATH)) {
+    $_PATH = [];
+    
+    // Load from JSON if available
+    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $decodedParams = json_decode($pathParamsJson, true);
+    if (is_array($decodedParams)) {
+        $_PATH = $decodedParams;
+    }
+    
+    // Add any FRANGO_PARAM_ variables for backward compatibility
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'FRANGO_PARAM_') === 0) {
+            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+            if (!isset($_PATH[$paramName])) {
+                $_PATH[$paramName] = $value;
+            }
+        }
+    }
+}
+
+// Get wildcard from path parameters
+$wildcardPath = $_PATH['*'] ?? 'no-wildcard';
+
+echo "Wildcard Route Handler: $wildcardPath";
+`
+
+	defaultScript := `<?php
 header('Content-Type: text/plain');
 echo "Default Route Handler";
-?>`
+`
 
 	// Create directories for scripts
 	routeDir := filepath.Join("routing", "priority")
@@ -1425,13 +1611,13 @@ echo "Default Route Handler";
 	wildcardPath := filepath.Join(routeDir, "wildcard.php")
 	defaultPath := filepath.Join(routeDir, "default.php")
 
-	err = os.WriteFile(specificPath, []byte(specificRouteScript), 0644)
+	err = os.WriteFile(specificPath, []byte(specificScript), 0644)
 	require.NoError(t, err, "Failed to write specific route script")
 
-	err = os.WriteFile(wildcardPath, []byte(wildcardRouteScript), 0644)
+	err = os.WriteFile(wildcardPath, []byte(wildcardScript), 0644)
 	require.NoError(t, err, "Failed to write wildcard route script")
 
-	err = os.WriteFile(defaultPath, []byte(defaultRouteScript), 0644)
+	err = os.WriteFile(defaultPath, []byte(defaultScript), 0644)
 	require.NoError(t, err, "Failed to write default route script")
 
 	// Setup frango

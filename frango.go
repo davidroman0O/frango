@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -230,12 +229,39 @@ func (m *Middleware) For(scriptPath string) http.Handler {
 		if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
 			registeredPattern = patternKey // Use the full pattern from context
 			m.logger.Printf("Using pattern from context: %s", registeredPattern)
+
+			// Extract parameters from pattern and URL path
+			requestPath := r.URL.Path
+			pathParams := extractPathParams(registeredPattern, requestPath)
+			if pathParams != nil && len(pathParams) > 0 {
+				// Log the extracted parameters
+				m.logger.Printf("Extracted path parameters: %v", pathParams)
+
+				// Add to environment variables
+				paramsJSON, _ := json.Marshal(pathParams)
+				// These will be picked up by path_globals.php
+				os.Setenv("FRANGO_PATH_PARAMS_JSON", string(paramsJSON))
+				for key, value := range pathParams {
+					os.Setenv("FRANGO_PARAM_"+key, value)
+				}
+			}
 		} else {
 			m.logger.Printf("No pattern found in context, using URL path: %s", registeredPattern)
 		}
 
 		// Execute PHP with the appropriate registered pattern for parameter extraction
 		m.executePHP(absScriptPath, nil, w, r)
+
+		// Clean up environment variables
+		if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
+			pathParams := extractPathParams(patternKey, r.URL.Path)
+			if pathParams != nil && len(pathParams) > 0 {
+				os.Unsetenv("FRANGO_PATH_PARAMS_JSON")
+				for key := range pathParams {
+					os.Unsetenv("FRANGO_PARAM_" + key)
+				}
+			}
+		}
 	})
 }
 
@@ -501,28 +527,37 @@ func MapFileSystemRoutes(
 
 // VirtualFS represents a virtual filesystem container for PHP files
 type VirtualFS struct {
-	name             string
-	sourceMappings   map[string]string // Virtual path -> source path
-	reverseSource    map[string]string // Source path -> virtual path
-	embedMappings    map[string]string // Virtual path -> embed temp path
-	baseTempPath     string            // Base temp dir for this VFS
-	sourceHashes     map[string]string // Source path -> content hash
-	middleware       *Middleware
-	mutex            sync.RWMutex
-	invalidated      bool            // Whether this VFS needs refresh
-	invalidatedPaths map[string]bool // Specific paths that need refresh
+	name              string
+	sourceMappings    map[string]string // Virtual path -> source path
+	reverseSource     map[string]string // Source path -> virtual path
+	embedMappings     map[string]string // Virtual path -> embed temp path
+	baseTempPath      string            // Base temp dir for this VFS
+	sourceHashes      map[string]string // Source path -> content hash
+	middleware        *Middleware
+	mutex             sync.RWMutex
+	invalidated       bool              // Whether this VFS needs refresh
+	invalidatedPaths  map[string]bool   // Specific paths that need refresh
+	watchTicker       *time.Ticker      // Ticker for file watching
+	watchStop         chan bool         // Channel to stop watching
+	fileOrigins       map[string]string // Virtual path -> origin type ("source", "embed", "virtual")
+	virtualFiles      map[string][]byte // Virtual path -> content for virtual files
+	virtualFileHashes map[string]string // Virtual path -> hash for virtual files
 }
 
 // NewFS creates a new virtual filesystem container
 func (m *Middleware) NewFS() *VirtualFS {
 	vfs := &VirtualFS{
-		name:             generateUniqueID(),
-		sourceMappings:   make(map[string]string),
-		reverseSource:    make(map[string]string),
-		embedMappings:    make(map[string]string),
-		sourceHashes:     make(map[string]string),
-		invalidatedPaths: make(map[string]bool),
-		middleware:       m,
+		name:              generateUniqueID(),
+		sourceMappings:    make(map[string]string),
+		reverseSource:     make(map[string]string),
+		embedMappings:     make(map[string]string),
+		sourceHashes:      make(map[string]string),
+		invalidatedPaths:  make(map[string]bool),
+		fileOrigins:       make(map[string]string),
+		virtualFiles:      make(map[string][]byte),
+		virtualFileHashes: make(map[string]string),
+		watchStop:         make(chan bool),
+		middleware:        m,
 	}
 
 	// Create base temp dir for this VFS
@@ -535,6 +570,51 @@ func (m *Middleware) NewFS() *VirtualFS {
 	vfs.baseTempPath = tempPath
 
 	return vfs
+}
+
+// AddSourceFile adds a single file from the filesystem to the VFS
+func (v *VirtualFS) AddSourceFile(sourcePath string, virtualPath string) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	// Normalize virtual path
+	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
+
+	// Get absolute path for the source file
+	absPath, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return fmt.Errorf("error resolving absolute path for '%s': %w", sourcePath, err)
+	}
+
+	// Verify file exists
+	fileInfo, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("error accessing file '%s': %w", absPath, err)
+	}
+	if fileInfo.IsDir() {
+		return fmt.Errorf("source path '%s' is a directory, expected a file", absPath)
+	}
+
+	// Calculate initial hash
+	hash, err := calculateFileHash(absPath)
+	if err != nil {
+		return fmt.Errorf("error calculating hash for '%s': %w", absPath, err)
+	}
+
+	// Store mappings
+	v.sourceMappings[virtualPath] = absPath
+	v.reverseSource[absPath] = virtualPath
+	v.sourceHashes[absPath] = hash
+	v.fileOrigins[virtualPath] = "source"
+
+	v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, absPath, hash[:8])
+
+	// Ensure file watching in development mode (if not already running)
+	if v.middleware.developmentMode && v.watchTicker == nil {
+		go v.watchSourceFiles()
+	}
+
+	return nil
 }
 
 // AddSourceDirectory adds all files from a source directory to the VFS
@@ -588,6 +668,7 @@ func (v *VirtualFS) AddSourceDirectory(pathPattern string, virtualPrefix string)
 					v.sourceMappings[virtualPath] = sourcePath
 					v.reverseSource[sourcePath] = virtualPath
 					v.sourceHashes[sourcePath] = hash
+					v.fileOrigins[virtualPath] = "source"
 
 					v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, sourcePath, hash[:8])
 				}
@@ -609,21 +690,22 @@ func (v *VirtualFS) AddSourceDirectory(pathPattern string, virtualPrefix string)
 			v.sourceMappings[virtualPath] = sourcePath
 			v.reverseSource[sourcePath] = virtualPath
 			v.sourceHashes[sourcePath] = hash
+			v.fileOrigins[virtualPath] = "source"
 
 			v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, sourcePath, hash[:8])
 		}
 	}
 
-	// Schedule file watching in development mode
-	if v.middleware.developmentMode {
+	// Schedule file watching in development mode (if not already running)
+	if v.middleware.developmentMode && v.watchTicker == nil {
 		go v.watchSourceFiles()
 	}
 
 	return nil
 }
 
-// AddEmbeddedFiles adds files from an embed.FS to the VFS
-func (v *VirtualFS) AddEmbeddedFiles(embedFS embed.FS, fsPath string, virtualPath string) error {
+// AddEmbeddedFile adds a single file from an embed.FS to the VFS
+func (v *VirtualFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath string) error {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
@@ -650,6 +732,7 @@ func (v *VirtualFS) AddEmbeddedFiles(embedFS embed.FS, fsPath string, virtualPat
 
 	// Store mapping
 	v.embedMappings[virtualPath] = tempPath
+	v.fileOrigins[virtualPath] = "embed"
 	v.middleware.logger.Printf("Added embedded file mapping: %s -> %s", virtualPath, tempPath)
 
 	return nil
@@ -703,11 +786,233 @@ func (v *VirtualFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtua
 
 			// Store mapping
 			v.embedMappings[virtualEntryPath] = tempPath
+			v.fileOrigins[virtualEntryPath] = "embed"
 			v.middleware.logger.Printf("Added embedded file mapping: %s -> %s", virtualEntryPath, tempPath)
 		}
 	}
 
 	return nil
+}
+
+// CreateVirtualFile creates a file directly in the virtual filesystem with provided content
+func (v *VirtualFS) CreateVirtualFile(virtualPath string, content []byte) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	// Normalize virtual path
+	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
+
+	// Create target directory in VFS temp space
+	targetDir := filepath.Dir(filepath.Join(v.baseTempPath, virtualPath))
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("error creating directory for virtual file '%s': %w", targetDir, err)
+	}
+
+	// Write to temp path
+	tempPath := filepath.Join(v.baseTempPath, virtualPath)
+	if err := os.WriteFile(tempPath, content, 0644); err != nil {
+		return fmt.Errorf("error writing virtual file to '%s': %w", tempPath, err)
+	}
+
+	// Store the content and mapping
+	v.virtualFiles[virtualPath] = content
+	v.embedMappings[virtualPath] = tempPath // Use embed mappings for write access
+	v.fileOrigins[virtualPath] = "virtual"
+
+	// Calculate hash of content
+	h := sha256.New()
+	h.Write(content)
+	hash := hex.EncodeToString(h.Sum(nil))
+	v.virtualFileHashes[virtualPath] = hash
+
+	v.middleware.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, hash[:8])
+
+	return nil
+}
+
+// CopyFile copies a file from one virtual path to another within the VFS
+func (v *VirtualFS) CopyFile(srcVirtualPath, destVirtualPath string) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	// Normalize paths
+	srcVirtualPath = filepath.Clean("/" + strings.TrimPrefix(srcVirtualPath, "/"))
+	destVirtualPath = filepath.Clean("/" + strings.TrimPrefix(destVirtualPath, "/"))
+
+	// Resolve the actual source path
+	var content []byte
+	var err error
+
+	// Check the source type
+	originType, exists := v.fileOrigins[srcVirtualPath]
+	if !exists {
+		return fmt.Errorf("source file not found in VFS: %s", srcVirtualPath)
+	}
+
+	switch originType {
+	case "source":
+		// Read from filesystem
+		sourcePath := v.sourceMappings[srcVirtualPath]
+		content, err = os.ReadFile(sourcePath)
+		if err != nil {
+			return fmt.Errorf("error reading source file '%s': %w", sourcePath, err)
+		}
+	case "embed", "virtual":
+		// For embedded or virtual files, get from the temp location
+		if tempPath, ok := v.embedMappings[srcVirtualPath]; ok {
+			content, err = os.ReadFile(tempPath)
+			if err != nil {
+				return fmt.Errorf("error reading embedded/virtual file '%s': %w", tempPath, err)
+			}
+		} else if originType == "virtual" {
+			// Get from in-memory content for virtual files
+			content = v.virtualFiles[srcVirtualPath]
+		} else {
+			return fmt.Errorf("embedded file mapping not found: %s", srcVirtualPath)
+		}
+	default:
+		return fmt.Errorf("unknown file origin type for %s: %s", srcVirtualPath, originType)
+	}
+
+	// Create target directory in VFS temp space
+	targetDir := filepath.Dir(filepath.Join(v.baseTempPath, destVirtualPath))
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("error creating directory for destination '%s': %w", targetDir, err)
+	}
+
+	// Write to destination temp path
+	tempPath := filepath.Join(v.baseTempPath, destVirtualPath)
+	if err := os.WriteFile(tempPath, content, 0644); err != nil {
+		return fmt.Errorf("error writing file to '%s': %w", tempPath, err)
+	}
+
+	// Store as a virtual file
+	v.virtualFiles[destVirtualPath] = content
+	v.embedMappings[destVirtualPath] = tempPath
+	v.fileOrigins[destVirtualPath] = "virtual"
+
+	// Calculate hash
+	h := sha256.New()
+	h.Write(content)
+	hash := hex.EncodeToString(h.Sum(nil))
+	v.virtualFileHashes[destVirtualPath] = hash
+
+	v.middleware.logger.Printf("Copied file: %s -> %s (hash: %s)", srcVirtualPath, destVirtualPath, hash[:8])
+
+	return nil
+}
+
+// MoveFile moves a file from one virtual path to another within the VFS
+func (v *VirtualFS) MoveFile(srcVirtualPath, destVirtualPath string) error {
+	// First copy the file
+	if err := v.CopyFile(srcVirtualPath, destVirtualPath); err != nil {
+		return err
+	}
+
+	// Then delete the source
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	// Don't actually delete source files from disk
+	originType := v.fileOrigins[srcVirtualPath]
+
+	// Remove mappings
+	delete(v.embedMappings, srcVirtualPath)
+	delete(v.virtualFiles, srcVirtualPath)
+	delete(v.virtualFileHashes, srcVirtualPath)
+	delete(v.fileOrigins, srcVirtualPath)
+
+	// For source files, only remove the virtual mapping, not the actual file
+	if originType == "source" {
+		sourcePath := v.sourceMappings[srcVirtualPath]
+		delete(v.sourceMappings, srcVirtualPath)
+		delete(v.reverseSource, sourcePath)
+		// We keep the sourceHashes entry for monitoring changes
+	}
+
+	v.middleware.logger.Printf("Moved file: %s -> %s", srcVirtualPath, destVirtualPath)
+	return nil
+}
+
+// DeleteFile removes a file from the VFS
+func (v *VirtualFS) DeleteFile(virtualPath string) error {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	// Normalize virtual path
+	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
+
+	// Check if file exists in VFS
+	originType, exists := v.fileOrigins[virtualPath]
+	if !exists {
+		return fmt.Errorf("file not found in VFS: %s", virtualPath)
+	}
+
+	// Remove mappings based on origin type
+	if originType == "source" {
+		sourcePath := v.sourceMappings[virtualPath]
+		delete(v.sourceMappings, virtualPath)
+		delete(v.reverseSource, sourcePath)
+		// We don't delete the source file from disk
+	} else if originType == "embed" || originType == "virtual" {
+		if tempPath, ok := v.embedMappings[virtualPath]; ok {
+			// Try to remove the temp file but don't error if it fails
+			_ = os.Remove(tempPath)
+			delete(v.embedMappings, virtualPath)
+		}
+		delete(v.virtualFiles, virtualPath)
+		delete(v.virtualFileHashes, virtualPath)
+	}
+
+	delete(v.fileOrigins, virtualPath)
+	v.middleware.logger.Printf("Deleted file from VFS: %s", virtualPath)
+	return nil
+}
+
+// ListFiles returns a list of all files in the VFS
+func (v *VirtualFS) ListFiles() []string {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
+	files := make([]string, 0, len(v.fileOrigins))
+	for path := range v.fileOrigins {
+		files = append(files, path)
+	}
+	return files
+}
+
+// GetFileContent reads the content of a file from the VFS
+func (v *VirtualFS) GetFileContent(virtualPath string) ([]byte, error) {
+	v.mutex.RLock()
+	defer v.mutex.RUnlock()
+
+	// Normalize virtual path
+	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
+
+	// Check file origin type
+	originType, exists := v.fileOrigins[virtualPath]
+	if !exists {
+		return nil, fmt.Errorf("file not found in VFS: %s", virtualPath)
+	}
+
+	// Get content based on origin type
+	switch originType {
+	case "source":
+		sourcePath := v.sourceMappings[virtualPath]
+		return os.ReadFile(sourcePath)
+	case "embed", "virtual":
+		// For virtual files, use in-memory content if available
+		if originType == "virtual" && len(v.virtualFiles[virtualPath]) > 0 {
+			return v.virtualFiles[virtualPath], nil
+		}
+		// Otherwise, read from temp path
+		if tempPath, ok := v.embedMappings[virtualPath]; ok {
+			return os.ReadFile(tempPath)
+		}
+		return nil, fmt.Errorf("error resolving file path: %s", virtualPath)
+	default:
+		return nil, fmt.Errorf("unknown file origin type: %s", originType)
+	}
 }
 
 // --- Internal methods ---
@@ -717,27 +1022,49 @@ func (v *VirtualFS) resolvePath(virtualPath string) string {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
 
-	// Check source mappings first (priority to live files)
-	if sourcePath, ok := v.sourceMappings[virtualPath]; ok {
-		return sourcePath
+	// Check origin type to prioritize correctly
+	originType, exists := v.fileOrigins[virtualPath]
+	if !exists {
+		return ""
 	}
 
-	// Check embed mappings
-	if embedPath, ok := v.embedMappings[virtualPath]; ok {
-		return embedPath
+	// Based on the origin type, get the appropriate path
+	switch originType {
+	case "source":
+		return v.sourceMappings[virtualPath]
+	case "embed", "virtual":
+		return v.embedMappings[virtualPath]
+	default:
+		return ""
 	}
-
-	// Not found
-	return ""
 }
 
 // watchSourceFiles periodically checks source files for changes
 func (v *VirtualFS) watchSourceFiles() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	// Stop existing watcher if any
+	if v.watchTicker != nil {
+		v.watchTicker.Stop()
+	}
 
-	for range ticker.C {
-		v.checkFileChanges()
+	v.watchTicker = time.NewTicker(500 * time.Millisecond)
+	go func() {
+		for {
+			select {
+			case <-v.watchTicker.C:
+				v.checkFileChanges()
+			case <-v.watchStop:
+				v.watchTicker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+// StopWatching stops the file watching goroutine
+func (v *VirtualFS) StopWatching() {
+	if v.watchTicker != nil {
+		v.watchStop <- true
+		v.watchTicker = nil
 	}
 }
 
@@ -746,6 +1073,7 @@ func (v *VirtualFS) checkFileChanges() {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
+	// Check source files
 	for sourcePath, oldHash := range v.sourceHashes {
 		// Skip if file doesn't exist
 		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
@@ -773,6 +1101,40 @@ func (v *VirtualFS) checkFileChanges() {
 			v.invalidated = true
 		}
 	}
+
+	// Check virtual files (for external modifications to temp files)
+	for virtualPath, oldHash := range v.virtualFileHashes {
+		if tempPath, ok := v.embedMappings[virtualPath]; ok {
+			// Skip if file doesn't exist
+			if _, err := os.Stat(tempPath); os.IsNotExist(err) {
+				continue
+			}
+
+			// Calculate new hash
+			newHash, err := calculateFileHash(tempPath)
+			if err != nil {
+				continue
+			}
+
+			// Check if hash changed
+			if newHash != oldHash {
+				v.middleware.logger.Printf("Virtual file changed on disk: %s", virtualPath)
+				v.middleware.logger.Printf("  Hash: %s -> %s", oldHash[:8], newHash[:8])
+
+				// Read the new content
+				content, err := os.ReadFile(tempPath)
+				if err == nil {
+					// Update in-memory content
+					v.virtualFiles[virtualPath] = content
+					v.virtualFileHashes[virtualPath] = newHash
+				}
+
+				// Mark path as invalidated
+				v.invalidatedPaths[virtualPath] = true
+				v.invalidated = true
+			}
+		}
+	}
 }
 
 // refreshIfNeeded ensures the PHP environment is updated if files changed
@@ -786,523 +1148,39 @@ func (v *VirtualFS) refreshIfNeeded(virtualPath string) {
 		delete(v.invalidatedPaths, virtualPath)
 
 		// Force environment refresh for this path by invalidating any cache
-		// for the source file it maps to
-		if sourcePath, ok := v.sourceMappings[virtualPath]; ok {
-			v.middleware.logger.Printf("Invalidating cache for source file: %s", sourcePath)
-			// Find any environments using this path and invalidate them
-			for _, env := range v.middleware.envCache.environments {
-				if env.OriginalPath == sourcePath {
-					// Force update by clearing its hash
-					env.mutex.Lock()
-					env.OriginalFileHash = ""
-					env.mutex.Unlock()
-					break
+		originType := v.fileOrigins[virtualPath]
+		if originType == "source" {
+			// For source files, invalidate by source path
+			if sourcePath, ok := v.sourceMappings[virtualPath]; ok {
+				v.middleware.logger.Printf("Invalidating cache for source file: %s", sourcePath)
+				// Find any environments using this path and invalidate them
+				for _, env := range v.middleware.envCache.environments {
+					if env.OriginalPath == sourcePath {
+						// Force update by clearing its hash
+						env.mutex.Lock()
+						env.OriginalFileHash = ""
+						env.mutex.Unlock()
+						break
+					}
+				}
+			}
+		} else if originType == "embed" || originType == "virtual" {
+			// For embed/virtual files, invalidate by temp path
+			if tempPath, ok := v.embedMappings[virtualPath]; ok {
+				v.middleware.logger.Printf("Invalidating cache for embedded/virtual file: %s", tempPath)
+				// Find any environments using this path and invalidate them
+				for _, env := range v.middleware.envCache.environments {
+					if env.OriginalPath == tempPath {
+						// Force update by clearing its hash
+						env.mutex.Lock()
+						env.OriginalFileHash = ""
+						env.mutex.Unlock()
+						break
+					}
 				}
 			}
 		}
 	}
-}
-
-// --- Internal Types (Lowercase) ---
-
-// phpContextKey is a custom context key type for PHP variables
-type phpContextKey string
-
-// phpEnvironment represents a complete PHP execution environment
-type phpEnvironment struct {
-	ID               string
-	OriginalPath     string // Absolute path to the source script
-	EndpointPath     string // Key used for cache lookup (usually OriginalPath)
-	TempPath         string // Path to the isolated temp dir for this env
-	ScriptRelPath    string // Relative path of the main script within the temp dir
-	LastUpdated      time.Time
-	OriginalFileHash string // Hash of OriginalPath content
-	mutex            sync.Mutex
-}
-
-// environmentCache manages all PHP execution environments
-type environmentCache struct {
-	sourceDir       string                     // User's main source dir
-	baseDir         string                     // Base temp dir for this frango instance
-	embedDir        string                     // Subdir in baseDir for embedded files (_frango_embeds)
-	globalLibraries map[string]string          // relPath in env -> abs path on disk (_frango_embeds/...)
-	environments    map[string]*phpEnvironment // Keyed by EndpointPath (abs script path)
-	mutex           sync.RWMutex
-	logger          *log.Logger
-	developmentMode bool
-}
-
-// newEnvironmentCache creates a new environment cache
-func newEnvironmentCache(sourceDir string, baseDir string, logger *log.Logger, developmentMode bool) *environmentCache {
-	embedDir := filepath.Join(baseDir, "_frango_embeds")
-	return &environmentCache{
-		sourceDir:       sourceDir,
-		baseDir:         baseDir,
-		embedDir:        embedDir,
-		environments:    make(map[string]*phpEnvironment),
-		globalLibraries: make(map[string]string),
-		logger:          logger,
-		developmentMode: developmentMode,
-	}
-}
-
-// AddGlobalLibrary tracks an embedded library file.
-func (c *environmentCache) AddGlobalLibrary(targetRelPath string, sourceDiskPath string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.globalLibraries[targetRelPath] = sourceDiskPath
-	c.logger.Printf("Tracking global library: %s -> %s", targetRelPath, sourceDiskPath)
-}
-
-// GetEnvironment retrieves or creates an environment for a specific PHP script.
-// endpointPath key is typically the absolute path to the script.
-func (c *environmentCache) GetEnvironment(endpointPath string, originalAbsPath string) (*phpEnvironment, error) {
-	// Ensure no query strings in original path
-	cleanOriginalPath := originalAbsPath
-	if queryIndex := strings.Index(cleanOriginalPath, "?"); queryIndex != -1 {
-		cleanOriginalPath = cleanOriginalPath[:queryIndex]
-	}
-
-	c.mutex.RLock()
-	env, exists := c.environments[endpointPath]
-	c.mutex.RUnlock()
-
-	if exists {
-		if c.developmentMode {
-			if err := c.updateEnvironmentIfNeeded(env); err != nil {
-				// Log update error but return existing env?
-				c.logger.Printf("Warning: Failed to update environment for %s: %v", endpointPath, err)
-				// return nil, err // Option: Fail request if update fails?
-			}
-		}
-		return env, nil
-	}
-
-	// Create a new environment
-	env, err := c.createEnvironment(endpointPath, cleanOriginalPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Store the environment
-	c.mutex.Lock()
-	c.environments[endpointPath] = env
-	c.mutex.Unlock()
-
-	return env, nil
-}
-
-// createEnvironment creates a new PHP execution environment
-func (c *environmentCache) createEnvironment(endpointPath string, originalAbsPath string) (*phpEnvironment, error) {
-	// Create a unique ID based *only* on a hash of the defining path
-	h := sha256.Sum256([]byte(endpointPath))
-	// Use a significant portion of the hash for the directory name to avoid collisions
-	id := hex.EncodeToString(h[:16]) // Use first 16 bytes (32 hex chars)
-
-	tempPath := filepath.Join(c.baseDir, id)
-	if err := os.MkdirAll(tempPath, 0755); err != nil {
-		return nil, fmt.Errorf("error creating environment directory '%s': %w", tempPath, err)
-	}
-
-	// Calculate initial file hash of the main script
-	initialHash, err := calculateFileHash(originalAbsPath)
-	if err != nil {
-		os.RemoveAll(tempPath)
-		return nil, fmt.Errorf("failed to calculate initial hash for '%s': %w", originalAbsPath, err)
-	}
-
-	// --- Calculate relative path BEFORE creating env struct ---
-	relScriptPath, err := c.calculateRelPath(originalAbsPath)
-	if err != nil {
-		os.RemoveAll(tempPath)
-		return nil, fmt.Errorf("cannot determine relative path for script '%s': %w", originalAbsPath, err)
-	}
-	// --- End calculate relative path ---
-
-	env := &phpEnvironment{
-		ID:               id,
-		OriginalPath:     originalAbsPath,
-		EndpointPath:     endpointPath,
-		TempPath:         tempPath,
-		ScriptRelPath:    relScriptPath, // Store relative path
-		LastUpdated:      time.Now(),
-		OriginalFileHash: initialHash,
-	}
-
-	// Copy necessary files to the environment
-	if err := c.populateEnvironmentFiles(env); err != nil {
-		os.RemoveAll(tempPath)
-		return nil, fmt.Errorf("failed to populate environment '%s': %w", env.ID, err)
-	}
-
-	c.logger.Printf("Created environment for '%s' at '%s'", endpointPath, tempPath)
-	return env, nil
-}
-
-// updateEnvironmentIfNeeded checks if an environment needs to be updated.
-func (c *environmentCache) updateEnvironmentIfNeeded(env *phpEnvironment) error {
-	env.mutex.Lock() // Lock specific env
-	defer env.mutex.Unlock()
-
-	// Hash check on main file only for now
-	currentHash, err := calculateFileHash(env.OriginalPath)
-	if err != nil {
-		c.logger.Printf("Warning: Could not calculate hash for '%s' during update check: %v", env.OriginalPath, err)
-		return nil // Don't fail update if hash check fails temporarily
-	}
-
-	if currentHash != env.OriginalFileHash {
-		c.logger.Printf("Rebuilding environment for '%s' due to file content change (hash mismatch)", env.EndpointPath)
-		if err := c.populateEnvironmentFiles(env); err != nil {
-			return fmt.Errorf("error rebuilding environment files for '%s': %w", env.EndpointPath, err)
-		}
-		env.OriginalFileHash = currentHash
-		env.LastUpdated = time.Now()
-	}
-	return nil
-}
-
-// calculateRelPath determines the relative path of a script based on source/embed dirs
-func (c *environmentCache) calculateRelPath(absScriptPath string) (string, error) {
-	var relPath string
-	var err error
-	if strings.HasPrefix(absScriptPath, c.embedDir) {
-		relPath, err = filepath.Rel(c.embedDir, absScriptPath)
-	} else {
-		relPath, err = filepath.Rel(c.sourceDir, absScriptPath)
-	}
-	if err != nil {
-		return "", err // Let caller handle specific error message
-	}
-	relPath = filepath.Clean(relPath)
-	// Handle file at root of source/embed more carefully
-	if relPath == "." {
-		relPath = filepath.Base(absScriptPath)
-	}
-	return relPath, nil
-}
-
-// _mirrorDirectoryContent mirrors all files from a source directory to a destination directory.
-// Used internally by populateEnvironmentFiles when dealing with SourceDir scripts.
-func (c *environmentCache) _mirrorDirectoryContent(sourceDir string, destDir string) error {
-	return filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Calculate the relative path from the source directory
-		relPath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return fmt.Errorf("error calculating relative path during mirror: %w", err)
-		}
-
-		// Calculate the target path in the environment
-		targetPath := filepath.Join(destDir, relPath)
-
-		if info.IsDir() {
-			// Create directories as needed
-			// Use MkdirAll to handle nested directories properly
-			if err := os.MkdirAll(targetPath, info.Mode().Perm()); err != nil {
-				return fmt.Errorf("error creating directory during mirror '%s': %w", targetPath, err)
-			}
-			return nil // Don't copy directory itself, just ensure it exists
-		}
-
-		// If not a directory, copy the file
-		if err := copyFile(path, targetPath); err != nil {
-			return fmt.Errorf("error copying file during mirror '%s' to '%s': %w", path, targetPath, err)
-		}
-
-		return nil
-	})
-}
-
-// populateEnvironmentFiles copies the necessary files into the environment.
-// If the source is from SourceDir, mirrors the whole SourceDir.
-// If the source is from EmbedDir, copies only the specific script.
-// Then, overlays global libraries.
-func (c *environmentCache) populateEnvironmentFiles(env *phpEnvironment) error {
-
-	// Clear the temp directory first? Or assume it's fresh?
-	// Assuming createEnvironment provides a fresh dir.
-	// If updateEnvironmentIfNeeded calls this, maybe it should clear first?
-	// For now, let's assume overwrite is okay.
-
-	// 1. Handle main script source (Mirror sourceDir OR copy single embed script)
-	if strings.HasPrefix(env.OriginalPath, c.embedDir) {
-		// Source is an embedded file - copy only this file
-		relEndpointPath := env.ScriptRelPath
-		if relEndpointPath == "" {
-			return fmt.Errorf("internal error: ScriptRelPath empty for embed env %s", env.ID)
-		}
-		targetEndpointPath := filepath.Join(env.TempPath, relEndpointPath)
-		if err := copyFile(env.OriginalPath, targetEndpointPath); err != nil {
-			return fmt.Errorf("failed to copy embedded endpoint file '%s' to '%s': %w", env.OriginalPath, targetEndpointPath, err)
-		}
-		c.logger.Printf("Populated env %s with single embedded script: %s", env.ID, relEndpointPath)
-
-	} else if strings.HasPrefix(env.OriginalPath, c.sourceDir) || !filepath.IsAbs(env.OriginalPath) {
-		// Source is from user's SourceDir (or was relative, assumed to be in sourceDir)
-		// Mirror the entire source directory content
-		c.logger.Printf("Populating env %s by mirroring SourceDir: %s", env.ID, c.sourceDir)
-		if err := c._mirrorDirectoryContent(c.sourceDir, env.TempPath); err != nil {
-			return fmt.Errorf("failed to mirror sourceDir '%s' to '%s': %w", c.sourceDir, env.TempPath, err)
-		}
-	} else {
-		// Original path is absolute but not in embed dir - how should this be handled?
-		// Copy just the single file for now.
-		c.logger.Printf("Warning: Handling absolute script path '%s' outside known source/embed dirs. Copying only the single file.", env.OriginalPath)
-		relEndpointPath := env.ScriptRelPath
-		if relEndpointPath == "" {
-			return fmt.Errorf("internal error: ScriptRelPath empty for absolute env %s", env.ID)
-		}
-		targetEndpointPath := filepath.Join(env.TempPath, relEndpointPath)
-		if err := copyFile(env.OriginalPath, targetEndpointPath); err != nil {
-			return fmt.Errorf("failed to copy absolute endpoint file '%s' to '%s': %w", env.OriginalPath, targetEndpointPath, err)
-		}
-	}
-
-	// 2. Copy global libraries (overlaying potentially mirrored files)
-	c.mutex.RLock() // Lock cache for reading libraries map
-	libsToCopy := make(map[string]string)
-	for target, source := range c.globalLibraries {
-		libsToCopy[target] = source
-	}
-	c.mutex.RUnlock()
-
-	for relLibPath, sourceLibPath := range libsToCopy {
-		targetLibPath := filepath.Join(env.TempPath, relLibPath)
-		if err := copyFile(sourceLibPath, targetLibPath); err != nil {
-			// Log warning but maybe continue?
-			c.logger.Printf("Warning: Failed to copy global library '%s' to '%s': %v", sourceLibPath, targetLibPath, err)
-			// return fmt.Errorf("failed to copy global library ...") // Option: Fail hard
-		}
-	}
-
-	return nil
-}
-
-// Cleanup removes all environments and the base temp dir.
-func (c *environmentCache) Cleanup() {
-	c.mutex.Lock() // Lock for modifying environments map
-	defer c.mutex.Unlock()
-
-	for key, env := range c.environments {
-		// Use c.logger, not m.logger
-		c.logger.Printf("Removing environment temp dir: %s (for %s)", env.TempPath, key)
-		// os.RemoveAll(env.TempPath) // This is handled by baseDir removal
-	}
-	c.environments = make(map[string]*phpEnvironment) // Clear map
-
-	// Use c.logger here too
-	c.logger.Printf("Cleanup complete (base temp dir removal handled elsewhere).")
-}
-
-// calculateFileHash calculates the SHA256 hash of a file's content.
-func calculateFileHash(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file '%s': %w", filePath, err)
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("failed to read file '%s' for hashing: %w", filePath, err)
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// copyFile utility copies a single file, creating destination directories.
-func copyFile(src, dst string) error {
-	sourceFileStat, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if !sourceFileStat.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", src)
-	}
-	source, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory '%s': %w", filepath.Dir(dst), err)
-	}
-	destination, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destination.Close()
-	_, err = io.Copy(destination, source)
-	return err
-}
-
-// --- Functional Options (Exported) ---
-
-// WithSourceDir sets the source directory for PHP files.
-func WithSourceDir(dir string) Option {
-	return func(m *Middleware) {
-		m.sourceDir = dir
-	}
-}
-
-// WithDevelopmentMode enables immediate file change detection and disables caching.
-func WithDevelopmentMode(enabled bool) Option {
-	return func(m *Middleware) {
-		m.developmentMode = enabled
-	}
-}
-
-// WithLogger sets a custom logger.
-func WithLogger(logger *log.Logger) Option {
-	return func(m *Middleware) {
-		m.logger = logger
-	}
-}
-
-// WithDirectPHPURLsBlocking controls whether direct PHP file access in URLs should be blocked.
-func WithDirectPHPURLsBlocking(block bool) Option {
-	return func(m *Middleware) {
-		m.blockDirectPHPURLs = block
-	}
-}
-
-// NOTE: Implicit flags are removed as routing is external now.
-
-// --- Internal Helpers ---
-
-// isHTTPMethod checks if a string is a valid uppercase HTTP method name.
-func isHTTPMethod(method string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
-		return true
-	default:
-		return false
-	}
-}
-
-// extractPathParams extracts path parameters from a URL pattern and actual path.
-// Example: extractPathParams("/users/{id}/posts/{postId}", "/users/42/posts/123")
-// returns: map[string]string{"id": "42", "postId": "123"}
-func extractPathParams(pattern, path string) map[string]string {
-	// Extract HTTP method if pattern includes it
-	patternPath := pattern
-	if parts := strings.SplitN(pattern, " ", 2); len(parts) > 1 {
-		patternPath = parts[1]
-	}
-
-	// Split pattern and path into segments
-	patternSegments := strings.Split(strings.Trim(patternPath, "/"), "/")
-	pathSegments := strings.Split(strings.Trim(path, "/"), "/")
-
-	// Check if segment counts don't match
-	if len(patternSegments) != len(pathSegments) {
-		return nil
-	}
-
-	// Extract parameters
-	params := make(map[string]string)
-	for i, patternSegment := range patternSegments {
-		// Check for parameter pattern {name}
-		if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
-			// Extract parameter name without braces
-			paramName := patternSegment[1 : len(patternSegment)-1]
-			if paramName != "" && paramName != "$" { // Skip special {$} if it exists
-				// Use actual path segment as parameter value
-				params[paramName] = pathSegments[i]
-			}
-		} else if patternSegment != pathSegments[i] {
-			// If a non-parameter segment doesn't match exactly, no match
-			return nil
-		}
-	}
-
-	return params
-}
-
-// resolveDirectory resolves a directory path, supporting both absolute and relative paths.
-// It tries multiple strategies to find the directory:
-// 1. Use the path directly if it exists (relative to CWD)
-// 2. If relative, try to find it relative to runtime caller
-// 3. If relative, try to find it relative to current working directory again
-// 4. Falls back to the original path if nothing is found (will likely error later)
-// NOTE: This function is restored from the original version to maintain behavior for examples run directly.
-func resolveDirectory(path string) (string, error) {
-	// If the path is absolute or explicitly relative (starts with ./ or ../)
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") {
-		absPath, err := filepath.Abs(path)
-		if err != nil {
-			return "", fmt.Errorf("error resolving absolute/explicit relative path '%s': %w", path, err)
-		}
-		if info, err := os.Stat(absPath); err == nil && info.IsDir() {
-			return absPath, nil
-		} else if err != nil {
-			return "", fmt.Errorf("error stating explicit path '%s': %w", absPath, err)
-		} else {
-			return "", fmt.Errorf("explicit path '%s' exists but is not a directory", absPath)
-		}
-	}
-
-	// For a bare directory name (like "web" in examples), try multiple locations directly
-
-	// 1. Try relative to CWD first.
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		absPath, absErr := filepath.Abs(path)
-		if absErr == nil {
-			return absPath, nil
-		}
-		// If os.Stat worked but Abs failed, that's weird, but report it.
-		return "", fmt.Errorf("found path '%s' relative to CWD but failed to get absolute path: %w", path, absErr)
-	}
-
-	// 2. Try relative to Caller (primarily for examples)
-	// Skip if path looks absolute or explicitly relative already.
-	if !filepath.IsAbs(path) && !strings.HasPrefix(path, ".") {
-		// Use Caller(2) to get the caller of frango.New (or wherever resolveDirectory was called from)
-		_, filename, _, ok := runtime.Caller(2)
-		if ok {
-			callerDir := filepath.Dir(filename)
-			callerPath := filepath.Join(callerDir, path)
-			absCallerPath, absErr := filepath.Abs(callerPath)
-			if absErr == nil {
-				if info, statErr := os.Stat(absCallerPath); statErr == nil && info.IsDir() {
-					// Found relative to caller of New
-					log.Printf("[frango] Info: Resolved path '%s' relative to caller (%s) -> %s", path, callerDir, absCallerPath)
-					return absCallerPath, nil
-				}
-			}
-		}
-	}
-
-	// 3. If neither worked, return the first error encountered (from CWD check)
-	// ... rest of function
-
-	return "", fmt.Errorf("directory '%s' not found relative to CWD or caller", path)
-}
-
-// extractParamNames parses a route pattern and returns a slice of parameter names.
-func extractParamNames(pattern string) []string {
-	var names []string
-	parts := strings.Split(pattern, "/")
-	for _, part := range parts {
-		if strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}") {
-			name := part[1 : len(part)-1]
-			if name != "" && name != "$" { // Exclude special {$}
-				names = append(names, name)
-			}
-		}
-	}
-	return names
-}
-
-// getMapKeys is a helper function to get the keys of a map for logging (internal)
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 // For returns an http.Handler that executes a PHP script from the VFS
@@ -1460,6 +1338,26 @@ func (m *Middleware) executePHP(absScriptPath string, renderFn RenderData, w htt
 		}
 
 		m.logger.Printf("Extracted path parameters: %v", pathParams)
+	} else {
+		// Check for any path parameters set in environment variables (for tests)
+		paramsJSON := os.Getenv("FRANGO_PATH_PARAMS_JSON")
+		if paramsJSON != "" {
+			m.logger.Printf("Found FRANGO_PATH_PARAMS_JSON in environment: %s", paramsJSON)
+			envData["FRANGO_PATH_PARAMS_JSON"] = paramsJSON
+		}
+
+		// Check for individual parameter variables
+		for _, env := range os.Environ() {
+			if strings.HasPrefix(env, "FRANGO_PARAM_") {
+				parts := strings.SplitN(env, "=", 2)
+				if len(parts) == 2 {
+					key := parts[0]
+					value := parts[1]
+					m.logger.Printf("Found param in environment: %s=%s", key, value)
+					envData[key] = value
+				}
+			}
+		}
 	}
 
 	// Add all query parameters with FRANGO_QUERY_ prefix
@@ -1540,33 +1438,7 @@ func (m *Middleware) executePHP(absScriptPath string, renderFn RenderData, w htt
 	phpFilePathInEnv := filepath.Join(env.TempPath, relPath)
 	m.logger.Printf("Executing PHP script in env: '%s' (from source: '%s')", phpFilePathInEnv, absScriptPath)
 
-	// 3a. Write path utility script to the environment
-	pathUtilityFilePath := filepath.Join(env.TempPath, "_frango_path_util.php")
-	if err := os.WriteFile(pathUtilityFilePath, []byte(pathUtilityScript), 0644); err != nil {
-		m.logger.Printf("Warning: Failed to write path utility script: %v", err)
-	}
-
-	// 3b. Generate a wrapper script that includes our utility and then includes the original script
-	// This ensures our $_PATH superglobal is defined before the user's script runs
-	wrapperPath := filepath.Join(env.TempPath, "_frango_wrapper_"+filepath.Base(relPath))
-	wrapperScript := fmt.Sprintf(`<?php
-// Frango auto-generated wrapper script
-require_once '%s'; // Include path utility script first
-require_once '%s'; // Then include the original script
-`, pathUtilityFilePath, phpFilePathInEnv)
-
-	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0644); err != nil {
-		m.logger.Printf("Error creating wrapper script: %v", err)
-		http.Error(w, "Server error creating PHP wrapper", http.StatusInternalServerError)
-		return
-	}
-
-	// Use the wrapper script path instead of the original script
-	phpFilePathInEnv = wrapperPath
-	scriptName := "/" + filepath.Base(wrapperPath)
-	m.logger.Printf("Using wrapper script: %s (scriptName: %s)", phpFilePathInEnv, scriptName)
-
-	// 4. Ensure target script exists and is a file within the env
+	// 4. Verify script file exists
 	fileInfo, err := os.Stat(phpFilePathInEnv)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1597,7 +1469,32 @@ require_once '%s'; // Then include the original script
 	// 5. Prepare FrankenPHP request options
 	// Document root is the PARENT directory of the script within the temp env
 	documentRoot := filepath.Dir(phpFilePathInEnv)
+	scriptName := "/" + relPath // Ensure leading slash
+
+	// If relPath already contains directory components, use just the filename
+	// This avoids paths like "/routing/routing/file.php"
+	if strings.Contains(relPath, "/") {
+		scriptName = "/" + filepath.Base(relPath)
+	}
+
 	m.logger.Printf("FrankenPHP Setup: DocumentRoot='%s', ScriptName='%s', URL='%s'", documentRoot, scriptName, r.URL.String())
+
+	// Path globals PHP file
+	pathGlobalsFile := filepath.Join(env.TempPath, "_frango_path_globals.php")
+
+	// Check if the path globals file exists
+	_, pathGlobalsErr := os.Stat(pathGlobalsFile)
+	if pathGlobalsErr != nil {
+		m.logger.Printf("Warning: Path globals file not found: %v", pathGlobalsErr)
+	} else {
+		// Add auto-prepend file to include path globals
+		m.logger.Printf("Adding path globals auto-prepend: %s", pathGlobalsFile)
+
+		// Auto-prepend doesn't work consistently across PHP versions and environments
+		// Instead, we'll explicitly set it via the environment
+		envData["PHP_AUTO_PREPEND_FILE"] = pathGlobalsFile
+		envData["PHP_INCLUDE_PATH"] = env.TempPath
+	}
 
 	// Inject envData (render vars, path params) and query params
 	phpBaseEnv := map[string]string{
