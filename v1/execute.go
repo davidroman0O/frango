@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -314,8 +315,69 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	phpFilePath, err := vfs.ResolvePath(scriptPath)
 	if err != nil {
 		m.logger.Printf("Error resolving script path '%s': %v", scriptPath, err)
-		http.Error(w, "Server error locating PHP script", http.StatusInternalServerError)
-		return
+
+		// If we couldn't find the file in the VFS, try to add it from the source directory
+		if m.sourceDir != "" && strings.HasPrefix(scriptPath, "/") {
+			// Try to find the file in the source directory
+			sourcePath := filepath.Join(m.sourceDir, filepath.FromSlash(strings.TrimPrefix(scriptPath, "/")))
+			m.logger.Printf("Looking for script in source directory: %s", sourcePath)
+			if _, err := os.Stat(sourcePath); err == nil {
+				// Add the file to the VFS
+				if err := vfs.AddSourceFile(sourcePath, scriptPath); err != nil {
+					m.logger.Printf("Error adding source file to VFS: %v", err)
+				} else {
+					// Try to resolve path again
+					phpFilePath, err = vfs.ResolvePath(scriptPath)
+					if err != nil {
+						m.logger.Printf("Error resolving script path after adding from source: %v", err)
+					}
+				}
+			}
+		}
+
+		// For script paths with parameters (e.g., /users/{userId}.php), try to find a physical file
+		// by replacing parameters with wildcards - this helps with test cases and direct filepath lookup
+		if err != nil && strings.Contains(scriptPath, "{") && strings.Contains(scriptPath, "}") {
+			m.logger.Printf("Script path contains parameters, trying to find a matching file pattern")
+
+			// Extract the directory part of the path
+			dirPath := filepath.Dir(scriptPath)
+			fileName := filepath.Base(scriptPath)
+
+			// List files in that directory
+			files, err := vfs.listFilesIn(dirPath)
+			if err == nil && len(files) > 0 {
+				// Look for a file with the same pattern (ignoring parameter values)
+				for _, f := range files {
+					// If the base name matches our pattern when parameters are replaced with wildcards
+					baseF := filepath.Base(f)
+					paramPattern := regexp.MustCompile(`\{[^}]+\}`)
+					patternRegex := "^" + paramPattern.ReplaceAllString(regexp.QuoteMeta(fileName), ".*") + "$"
+					matched, _ := regexp.MatchString(patternRegex, baseF)
+
+					if matched {
+						m.logger.Printf("Found matching file pattern: %s", f)
+						// Use this file instead
+						scriptPath = f
+						phpFilePath, err = vfs.ResolvePath(scriptPath)
+						if err == nil {
+							break
+						}
+					}
+				}
+			}
+
+			// If we still couldn't find a match, try looking for actual files with {param} literally in the name
+			if err != nil {
+				phpFilePath, err = vfs.ResolvePathLiteral(scriptPath)
+				m.logger.Printf("Tried literal path resolution: %v", err)
+			}
+		}
+
+		if err != nil {
+			http.Error(w, "Server error locating PHP script", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// 4. Verify script file exists

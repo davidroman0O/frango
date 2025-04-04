@@ -431,6 +431,38 @@ echo "<p>Welcome, {$user['name']}!</p>";
 ?>
 ```
 
+## Path Parameter Extraction
+
+Frango now automatically extracts path parameters from URLs by matching against the script path pattern. For example:
+
+```go
+// Define a route with a parameter pattern in the script path
+mux.Handle("/users/", php.For("/users/{id}.php"))
+```
+
+When a request is made to `/users/123`, Frango will:
+1. Recognize the pattern `/users/{id}` from the script path 
+2. Match it against the request URL `/users/123`
+3. Extract the parameter `id=123`
+4. Make it available in PHP via the `$_PATH` superglobal
+
+In your PHP code, you can access the parameter like this:
+```php
+<?php
+// Access the ID parameter from the URL
+$userId = $_PATH['id'];
+echo "User ID: " . $userId;
+
+// Or use the helper function
+$userId = path_param('id', 'default');
+if (has_path_param('id')) {
+    // Do something with the parameter
+}
+?>
+```
+
+This automatic extraction eliminates the need for manual context manipulation and makes route handling much simpler.
+
 ## License
 
 MIT

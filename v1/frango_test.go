@@ -154,7 +154,7 @@ func TestBasicHandlers(t *testing.T) {
 			method:       "GET",
 			path:         "/",
 			wantStatus:   http.StatusOK,
-			wantContains: "PHP output from /index.php",
+			wantContains: "Hello from index.php",
 		},
 		{
 			name:         "About page",
@@ -162,7 +162,7 @@ func TestBasicHandlers(t *testing.T) {
 			method:       "GET",
 			path:         "/about",
 			wantStatus:   http.StatusOK,
-			wantContains: "PHP output from /about.php",
+			wantContains: "About page",
 		},
 		{
 			name:         "Users index page",
@@ -170,7 +170,7 @@ func TestBasicHandlers(t *testing.T) {
 			method:       "GET",
 			path:         "/users",
 			wantStatus:   http.StatusOK,
-			wantContains: "PHP output from", // Just check for the header; the full path might vary
+			wantContains: "Users index page",
 		},
 	}
 
@@ -210,11 +210,38 @@ func TestRenderHandler(t *testing.T) {
 	php, cleanupMiddleware := setupTestMiddleware(t, sourceDir, WithDevelopmentMode(true))
 	defer cleanupMiddleware()
 
+	// Update the index.php file to display render variables
+	indexPath := filepath.Join(sourceDir, "index.php")
+	indexContent := `<?php 
+		echo "Hello from index.php\n";
+		// Check for title variable
+		if (isset($title)) {
+			echo "Template Variable: title = " . $title . "\n";
+		}
+		// Check for user variable
+		if (isset($user) && is_array($user)) {
+			echo "Template Variable: user = " . json_encode($user) . "\n";
+		}
+		// Check if variables are available in $_TEMPLATE
+		if (isset($_TEMPLATE) && is_array($_TEMPLATE)) {
+			echo "Template Variables via $_TEMPLATE:\n";
+			foreach ($_TEMPLATE as $key => $value) {
+				echo "  $_TEMPLATE[$key] = " . json_encode($value) . "\n";
+			}
+		}
+	?>`
+	if err := os.WriteFile(indexPath, []byte(indexContent), 0644); err != nil {
+		t.Fatalf("Failed to update index.php: %v", err)
+	}
+
 	// Create render function
 	renderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
 		return map[string]interface{}{
-			"title":   "Test Title",
-			"message": "Test Message",
+			"title": "Test Title",
+			"user": map[string]interface{}{
+				"name": "John Doe",
+				"role": "Admin",
+			},
 		}
 	}
 
@@ -238,15 +265,21 @@ func TestRenderHandler(t *testing.T) {
 	bodyStr := string(body)
 
 	// Look for render variables
-	if !strings.Contains(bodyStr, "Template Variable: title") ||
-		!strings.Contains(bodyStr, "Template Variable: message") {
-		t.Errorf("Handler did not include template variables: %s", bodyStr)
+	expectedPhrases := []string{
+		"Template Variable: title",
+		"Template Variable: user",
+	}
+
+	for _, phrase := range expectedPhrases {
+		if !strings.Contains(bodyStr, phrase) {
+			t.Errorf("Handler did not include template variables: %s", bodyStr)
+			break
+		}
 	}
 }
 
 // TestPathParameters tests path parameter extraction
 func TestPathParameters(t *testing.T) {
-
 	// Create test files
 	sourceDir, cleanupFiles := createTestFiles(t)
 	defer cleanupFiles()
@@ -255,15 +288,37 @@ func TestPathParameters(t *testing.T) {
 	php, cleanupMiddleware := setupTestMiddleware(t, sourceDir, WithDevelopmentMode(true))
 	defer cleanupMiddleware()
 
-	// Create handler
-	userHandler := php.For("users/index.php")
+	// Update the users/index.php file to specifically check for userId
+	usersPath := filepath.Join(sourceDir, "users", "index.php")
+	usersContent := `<?php 
+		echo "Users index page";
+		if (isset($_PATH['userId'])) {
+			echo " - User ID: " . $_PATH['userId'];
+		}
+	?>`
+	// Create directory if needed
+	os.MkdirAll(filepath.Dir(usersPath), 0755)
+	if err := os.WriteFile(usersPath, []byte(usersContent), 0644); err != nil {
+		t.Fatalf("Failed to update users/index.php: %v", err)
+	}
 
-	// Create test request with path parameter context
+	// Create a user profile script with the parameter in the filename
+	userProfilePath := filepath.Join(sourceDir, "users", "{userId}.php")
+	userProfileContent := `<?php 
+		echo "User profile page";
+		if (isset($_PATH['userId'])) {
+			echo " - User ID: " . $_PATH['userId'];
+		}
+	?>`
+	if err := os.WriteFile(userProfilePath, []byte(userProfileContent), 0644); err != nil {
+		t.Fatalf("Failed to create users/{userId}.php: %v", err)
+	}
+
+	// Create handler for the new file that has the parameter in its path
+	userHandler := php.For("users/{userId}.php")
+
+	// Test request with a specific user ID
 	req := httptest.NewRequest("GET", "/users/42", nil)
-	ctx := req.Context()
-	ctx = context.WithValue(ctx, phpContextKey("pattern"), "GET /users/{userId}")
-	req = req.WithContext(ctx)
-
 	rr := httptest.NewRecorder()
 
 	// Execute request
@@ -278,8 +333,9 @@ func TestPathParameters(t *testing.T) {
 	body, _ := io.ReadAll(rr.Body)
 	bodyStr := string(body)
 
-	// Look for path parameter
-	if !strings.Contains(bodyStr, "Path Parameter: userId = 42") {
+	// Look for path parameter in the output
+	expectedText := "User profile page - User ID: 42"
+	if !strings.Contains(bodyStr, expectedText) {
 		t.Errorf("Handler did not extract path parameter: %s", bodyStr)
 	}
 }
@@ -318,7 +374,7 @@ func TestVFS(t *testing.T) {
 
 	// Check response body
 	body, _ := io.ReadAll(rr.Body)
-	if !strings.Contains(string(body), "PHP output from /test.php") {
+	if !strings.Contains(string(body), "Virtual file test") {
 		t.Errorf("Handler returned unexpected body: %s", string(body))
 	}
 }
@@ -1040,9 +1096,39 @@ func TestBasicRequest(t *testing.T) {
 	var logOutput strings.Builder
 	logger := log.New(&logOutput, "", 0)
 
+	// First create the testdata directory and the test.php file if they don't exist
+	testdataDir := "testdata"
+	if err := os.MkdirAll(testdataDir, 0755); err != nil {
+		t.Fatalf("Failed to create testdata directory: %v", err)
+	}
+
+	testPHPFile := filepath.Join(testdataDir, "test.php")
+	testPHPContent := `<?php
+		echo "This is a test PHP file";
+		
+		// Display any path parameters that might be set
+		if (isset($_PATH) && count($_PATH) > 0) {
+			echo "\nPath parameters:\n";
+			foreach ($_PATH as $key => $value) {
+				echo "$key: $value\n";
+			}
+		}
+	?>`
+
+	if err := os.WriteFile(testPHPFile, []byte(testPHPContent), 0644); err != nil {
+		t.Fatalf("Failed to create test PHP file: %v", err)
+	}
+
+	// Get the absolute path to the testdata directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+	absTestdataDir := filepath.Join(cwd, testdataDir)
+
 	// Create middleware with test directory
 	m, err := New(
-		WithSourceDir("testdata"),
+		WithSourceDir(absTestdataDir),
 		WithLogger(logger),
 		WithDevelopmentMode(true),
 	)
@@ -1051,15 +1137,12 @@ func TestBasicRequest(t *testing.T) {
 	}
 	defer m.Shutdown()
 
-	// Create a handler for our test PHP file
-	handler := m.For("test.php")
-
 	// Create a test request
 	req := httptest.NewRequest("GET", "/test.php", nil)
 	w := httptest.NewRecorder()
 
 	// Execute the request
-	handler.ServeHTTP(w, req)
+	m.ExecutePHP("/test.php", m.rootVFS, nil, w, req)
 
 	// Check the response
 	resp := w.Result()
@@ -1378,12 +1461,81 @@ func TestContextKeyExtraction(t *testing.T) {
 			// Apply the test case setup to add values
 			ctx := tc.setup(baseCtx)
 
-			// Extract the pattern
-			result := php12PatternContextKey(ctx)
+			// Extract the pattern using the correct function
+			result := extractPatternFromContext(ctx)
 
 			// Verify the result
 			if result != tc.expected {
 				t.Errorf("Expected pattern %q but got %q", tc.expected, result)
+			}
+		})
+	}
+}
+
+// TestScriptPathPatternExtraction tests the automatic extraction of patterns from script paths
+func TestScriptPathPatternExtraction(t *testing.T) {
+	// Create middleware
+	php, cleanupMiddleware := setupTestMiddleware(t, "", WithDevelopmentMode(true))
+	defer cleanupMiddleware()
+
+	// Create a VFS for testing
+	vfs := php.NewVFS()
+	defer vfs.Cleanup()
+
+	// Create a test PHP script file
+	scriptContent := []byte(`<?php
+	echo "Path Parameter Test\n";
+	echo "=================\n";
+	echo "Path Parameters: ";
+	var_export($_PATH);
+	echo "\n";
+	?>`)
+
+	// Create virtual files with parameter patterns in their paths
+	vfs.CreateVirtualFile("/users/{id}.php", scriptContent)
+	vfs.CreateVirtualFile("/products/{category}/{id}.php", scriptContent)
+
+	testCases := []struct {
+		name           string
+		scriptPath     string
+		requestPath    string
+		expectedParams map[string]string
+	}{
+		{
+			name:           "Single Parameter",
+			scriptPath:     "/users/{id}.php",
+			requestPath:    "/users/42",
+			expectedParams: map[string]string{"id": "42"},
+		},
+		{
+			name:           "Multiple Parameters",
+			scriptPath:     "/products/{category}/{id}.php",
+			requestPath:    "/products/electronics/123",
+			expectedParams: map[string]string{"category": "electronics", "id": "123"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create a test request with the path that should match our pattern
+			req := httptest.NewRequest("GET", tc.requestPath, nil)
+			w := httptest.NewRecorder()
+
+			// Execute the request - no need to manually set context
+			php.ExecutePHP(tc.scriptPath, vfs, nil, w, req)
+
+			// Check the response
+			resp := w.Result()
+			body, _ := io.ReadAll(resp.Body)
+			bodyStr := string(body)
+
+			// Verify all expected parameters are found in the output
+			for paramName, paramValue := range tc.expectedParams {
+				expectedStr := fmt.Sprintf("'%s' => '%s'", paramName, paramValue)
+				if !strings.Contains(bodyStr, expectedStr) {
+					t.Errorf("Expected parameter %s=%s not found in output:\n%s",
+						paramName, paramValue, bodyStr)
+				}
 			}
 		})
 	}

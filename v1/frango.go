@@ -317,7 +317,42 @@ func (m *Middleware) For(scriptPath string) http.Handler {
 			}
 		}
 
-		// Check if file exists in VFS
+		// Check if script path contains parameters (like /users/{userId}.php)
+		hasParameters := strings.Contains(scriptPath, "{") && strings.Contains(scriptPath, "}")
+
+		// For parameter paths like /users/{userId}.php, we need special handling
+		if hasParameters {
+			// Use the script path itself to auto-extract parameters from URL
+			// For example: if scriptPath = "/users/{userId}.php" and r.URL.Path = "/users/42"
+			// this will extract userId=42 from the URL path
+
+			// First, make sure the VFS has this file
+			if !vfs.FileExists(scriptPath) {
+				// Try to resolve it from sourceDir
+				absPath := m.resolveScriptPath(scriptPath)
+				if absPath != "" {
+					scriptPath = absPath
+				}
+
+				// For scripts with parameters, the exact file might not exist in VFS yet
+				// but could be available from the source directory
+				if m.sourceDir != "" {
+					sourcePath := filepath.Join(m.sourceDir, filepath.FromSlash(strings.TrimPrefix(scriptPath, "/")))
+					if _, err := os.Stat(sourcePath); err == nil {
+						// Add it from the source directory
+						if err := vfs.AddSourceFile(sourcePath, scriptPath); err != nil {
+							m.logger.Printf("Error adding source file '%s' to VFS: %v", sourcePath, err)
+						}
+					}
+				}
+			}
+
+			// Execute the script - the ExecutePHP function will handle parameter extraction
+			m.ExecutePHP(scriptPath, vfs, nil, w, r)
+			return
+		}
+
+		// For non-parameterized scripts, follow the normal path
 		if !vfs.FileExists(scriptPath) {
 			// Try to resolve as a path relative to sourceDir
 			absPath := m.resolveScriptPath(scriptPath)

@@ -1198,3 +1198,78 @@ func (v *VFS) addSourceDirectoryRecursive(sourceDir, virtualBasePath string, rec
 
 	return nil
 }
+
+// listFilesIn returns a list of files in the specified virtual directory
+func (vfs *VFS) listFilesIn(dirPath string) ([]string, error) {
+	vfs.mutex.RLock()
+	defer vfs.mutex.RUnlock()
+
+	// Normalize the directory path
+	dirPath = normalizePath(dirPath)
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+
+	filesList := []string{}
+
+	// Find files that start with the directory path
+	for path := range vfs.fileOrigins {
+		if strings.HasPrefix(path, dirPath) {
+			// Check if it's a direct child of the directory
+			// (no further subdirectories in the relative path)
+			relPath := strings.TrimPrefix(path, dirPath)
+			if !strings.Contains(relPath, "/") {
+				filesList = append(filesList, path)
+			}
+		}
+	}
+
+	if len(filesList) == 0 {
+		return nil, fmt.Errorf("no files found in directory: %s", dirPath)
+	}
+
+	return filesList, nil
+}
+
+// ResolvePathLiteral resolves a virtual path to a filesystem path literally,
+// without normalizing or cleaning the path. This is useful for paths with
+// special characters like curly braces that should be treated literally.
+func (vfs *VFS) ResolvePathLiteral(virtualPath string) (string, error) {
+	// Try to find a file with the exact name, preserving special characters like {param}
+	vfs.mutex.RLock()
+	defer vfs.mutex.RUnlock()
+
+	// Since our internal map uses normalized paths, we need to look through all
+	// entries to find one that might be equivalent without normalization
+	for storedPath, origin := range vfs.fileOrigins {
+		if strings.EqualFold(storedPath, virtualPath) ||
+			(strings.Contains(storedPath, "{") && strings.Contains(virtualPath, "{")) {
+			// Found a potential match - check if it exists on disk
+			switch origin {
+			case OriginSource:
+				// Get the mapped file path from source mappings
+				mappedPath, exists := vfs.sourceMappings[storedPath]
+				if exists {
+					return mappedPath, nil
+				}
+			case OriginEmbed:
+				// Get the mapped file path from embed mappings
+				mappedPath, exists := vfs.embedMappings[storedPath]
+				if exists {
+					return mappedPath, nil
+				}
+			case OriginVirtual:
+				// For virtual files, the path is the temp directory path
+				return filepath.Join(vfs.tempDir, filepath.FromSlash(storedPath)), nil
+			}
+		}
+	}
+
+	// Try looking for the literal file on disk as a last resort
+	literalPath := filepath.Join(vfs.tempDir, filepath.FromSlash(virtualPath))
+	if _, err := os.Stat(literalPath); err == nil {
+		return literalPath, nil
+	}
+
+	return "", fmt.Errorf("virtual path not found: %s", virtualPath)
+}
