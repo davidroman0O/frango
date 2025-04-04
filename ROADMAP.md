@@ -1,5 +1,7 @@
 # Frango Refactoring Roadmap
 
+> first of all, ZERO `//go:build nowatcher` please
+
 ## Vision
 
 Create a cohesive, VFS-centric middleware library for PHP integration in Go applications with an intuitive API. The library should maintain excellent performance via caching while supporting live development through file watching.

@@ -2,9 +2,7 @@ package frango
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -291,15 +289,7 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	reqClone.URL.Path = scriptName
 	m.logger.Printf("Modified request clone path for FrankenPHP: %s", reqClone.URL.Path)
 
-	// This variable is only set to true in test_mock.go which is included with the nowatcher tag
-	// During normal builds, it remains false
-	if isMockBuild {
-		// Testing: use mock handlers
-		mockExecutePHP(documentRoot, phpBaseEnv, w, reqClone, m.logger)
-		return
-	}
-
-	// Production: use real FrankenPHP
+	// Create and execute the FrankenPHP request
 	req, err := frankenphp.NewRequestWithContext(
 		reqClone,
 		frankenphp.WithRequestDocumentRoot(documentRoot, false),
@@ -416,33 +406,4 @@ func getMapKeys(m map[string]interface{}) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-// Set by test files for mocking
-var isMockBuild = false
-
-// mockExecutePHP is called by tests to properly mock PHP execution
-func mockExecutePHP(documentRoot string, env map[string]string, w http.ResponseWriter, r *http.Request, logger *log.Logger) {
-	logger.Printf("Using mock PHP executor")
-
-	// Create a basic PHP-like response
-	output := fmt.Sprintf("PHP output from %s in %s\n", r.URL.Path, documentRoot)
-
-	// Add any template variables and path parameters
-	for k, v := range env {
-		if len(k) > 8 && k[:8] == "PHP_VAR_" {
-			varName := k[8:]
-			output += fmt.Sprintf("Template Variable: %s = %s\n", varName, v)
-		}
-
-		if len(k) > 15 && k[:15] == "PHP_PATH_PARAM_" {
-			paramName := k[15:]
-			output += fmt.Sprintf("Path Parameter: %s = %s\n", paramName, v)
-		}
-	}
-
-	// Set headers and write response
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(output))
 }

@@ -1,6 +1,3 @@
-//go:build nowatcher
-// +build nowatcher
-
 package frango
 
 import (
