@@ -23,7 +23,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path"
@@ -1117,22 +1116,6 @@ func normalizePath(virtualPath string) string {
 	return virtualPath
 }
 
-// calculateFileHash calculates the SHA-256 hash of a file
-func calculateFileHash(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file for hashing: %w", err)
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("failed to read file for hashing: %w", err)
-	}
-
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 // calculateContentHash calculates the SHA-256 hash of a byte slice
 func calculateContentHash(content []byte) string {
 	h := sha256.New()
@@ -1146,32 +1129,6 @@ func truncateHash(hash string) string {
 		return hash[:8]
 	}
 	return hash
-}
-
-// copyFile copies a file from src to dst
-func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("failed to open source file: %w", err)
-	}
-	defer srcFile.Close()
-
-	// Create destination directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer dstFile.Close()
-
-	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		return fmt.Errorf("failed to copy file content: %w", err)
-	}
-
-	return nil
 }
 
 // addSourceDirectoryRecursive adds all PHP files from a directory to the VFS
