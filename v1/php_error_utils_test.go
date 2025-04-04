@@ -1,6 +1,10 @@
 package frango
 
 import (
+	"io"
+	"log"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -136,4 +140,141 @@ func TestCustomPHPErrorCheck(t *testing.T) {
 	mockT = new(testing.T)
 	CustomPHPErrorCheck(mockT, "This contains a custom warning pattern that should be detected", customPatterns)
 	assert.True(t, mockT.Failed(), "Should fail when custom errors are present")
+}
+
+// TestErrorDetectionWithRealPHPErrors creates actual PHP scripts with errors and verifies they are detected
+func TestErrorDetectionWithRealPHPErrors(t *testing.T) {
+	// Create temp directory for test files
+	tempDir, err := os.MkdirTemp("", "frango-php-errors-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a VFS instance for testing
+	logger := log.New(io.Discard, "", 0)
+	vfs, err := NewVFS(tempDir, logger, true)
+	if err != nil {
+		t.Fatalf("Failed to create VFS: %v", err)
+	}
+	defer vfs.Cleanup()
+
+	errorScripts := []struct {
+		name         string
+		content      string
+		errorType    PHPErrorType
+		errorStrings []string // Multiple possible error indicators that could match
+	}{
+		{
+			name: "syntax_error.php",
+			content: `<?php
+				echo "This has a syntax error;
+				$foo = "unclosed string;
+			?>`,
+			errorType:    PHPErrorFatal,
+			errorStrings: []string{"Parse error:", "syntax error"},
+		},
+		{
+			name: "undefined_function.php",
+			content: `<?php
+				this_function_does_not_exist();
+			?>`,
+			errorType:    PHPErrorFatal,
+			errorStrings: []string{"Fatal error:", "Call to undefined function", "Uncaught Error:"},
+		},
+		{
+			name: "undefined_variable.php",
+			content: `<?php
+				echo $undefined_variable;
+			?>`,
+			errorType:    PHPErrorNotice,
+			errorStrings: []string{"Notice:", "undefined variable", "Undefined variable"},
+		},
+		{
+			name: "division_by_zero.php",
+			content: `<?php
+				$result = 10 / 0;
+				echo $result;
+			?>`,
+			errorType:    PHPErrorFatal, // In PHP 8 this is a fatal error, not a warning
+			errorStrings: []string{"Division by zero", "DivisionByZeroError", "Uncaught"},
+		},
+		{
+			name: "type_error.php",
+			content: `<?php
+				function test_type(int $x) {
+					return $x + 1;
+				}
+				test_type("not an integer");
+			?>`,
+			errorType:    PHPErrorFatal,
+			errorStrings: []string{"TypeError", "Uncaught"},
+		},
+	}
+
+	// Create scripts with different types of errors
+	for _, script := range errorScripts {
+		t.Run(script.name, func(t *testing.T) {
+			// Create the error script
+			vfs.CreateVirtualFile("/"+script.name, []byte(script.content))
+
+			// Create a buffer to capture stdout/stderr
+			var output strings.Builder
+
+			// Create middleware with the VFS
+			middleware, err := New(
+				WithLogger(log.New(&output, "", 0)),
+				WithDevelopmentMode(true),
+			)
+			if err != nil {
+				t.Fatalf("Failed to create middleware: %v", err)
+			}
+			defer middleware.Shutdown()
+
+			// Create a test request
+			req := httptest.NewRequest("GET", "/"+script.name, nil)
+			w := httptest.NewRecorder()
+
+			// Execute the PHP script
+			middleware.ExecutePHP("/"+script.name, vfs, nil, w, req)
+
+			// Get the response
+			resp := w.Result()
+			body, _ := io.ReadAll(resp.Body)
+			bodyStr := string(body)
+
+			// Verify the error was detected
+			result := CheckPHPErrors(bodyStr)
+			if result == nil {
+				t.Errorf("Failed to detect PHP error in output: %s", bodyStr)
+				return
+			}
+
+			// Verify the detected error type matches the expected one
+			if result.Type != script.errorType {
+				t.Errorf("Wrong error type detected: expected %s, got %s", script.errorType, result.Type)
+			}
+
+			// Check if any of the possible error strings is found in the output
+			errorFound := false
+			for _, errorStr := range script.errorStrings {
+				if strings.Contains(strings.ToLower(bodyStr), strings.ToLower(errorStr)) {
+					errorFound = true
+					break
+				}
+			}
+
+			if !errorFound {
+				t.Errorf("None of the expected error strings %v found in output: %s",
+					script.errorStrings, bodyStr)
+			}
+
+			// Also test the AssertNoPHPErrors function (it should fail on these scripts)
+			mockT := new(testing.T)
+			AssertNoPHPErrors(mockT, bodyStr)
+			if !mockT.Failed() {
+				t.Errorf("AssertNoPHPErrors should have failed for script with errors")
+			}
+		})
+	}
 }

@@ -21,14 +21,21 @@ var PHPErrorIndicators = map[PHPErrorType][]string{
 		"Fatal error:",
 		"Parse error:",
 		"Uncaught Exception",
+		"Uncaught Error:",
 		"Stack trace:",
 		"Error:",
 		"syntax error",
+		"Call to undefined function",
+		"Uncaught DivisionByZeroError",
+		"Uncaught TypeError",
+		"Allowed memory size",
+		"Maximum execution time",
 	},
 	PHPErrorWarning: {
 		"Warning:",
 		"include failed",
 		"require failed",
+		"Division by zero",
 	},
 	PHPErrorNotice: {
 		"Notice:",
@@ -38,6 +45,7 @@ var PHPErrorIndicators = map[PHPErrorType][]string{
 		"undefined offset",
 		"undefined constant",
 		"undefined array key",
+		"Trying to access array offset",
 	},
 }
 

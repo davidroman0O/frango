@@ -191,9 +191,14 @@ func TestBasicHandlers(t *testing.T) {
 
 			// Check response body
 			body, _ := io.ReadAll(rr.Body)
-			if !strings.Contains(string(body), tt.wantContains) {
+			bodyStr := string(body)
+
+			// Check for PHP errors
+			AssertNoPHPErrors(t, bodyStr)
+
+			if !strings.Contains(bodyStr, tt.wantContains) {
 				t.Errorf("Handler returned unexpected body: got %v, which doesn't contain %v",
-					string(body), tt.wantContains)
+					bodyStr, tt.wantContains)
 			}
 		})
 	}
@@ -264,6 +269,9 @@ func TestRenderHandler(t *testing.T) {
 	body, _ := io.ReadAll(rr.Body)
 	bodyStr := string(body)
 
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
+
 	// Look for render variables
 	expectedPhrases := []string{
 		"Template Variable: title",
@@ -333,6 +341,9 @@ func TestPathParameters(t *testing.T) {
 	body, _ := io.ReadAll(rr.Body)
 	bodyStr := string(body)
 
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
+
 	// Look for path parameter in the output
 	expectedText := "User profile page - User ID: 42"
 	if !strings.Contains(bodyStr, expectedText) {
@@ -374,6 +385,11 @@ func TestVFS(t *testing.T) {
 
 	// Check response body
 	body, _ := io.ReadAll(rr.Body)
+	bodyStr := string(body)
+
+	// Check for PHP errors
+	AssertNoPHPErrors(t, bodyStr)
+
 	if !strings.Contains(string(body), "Virtual file test") {
 		t.Errorf("Handler returned unexpected body: %s", string(body))
 	}
@@ -440,6 +456,10 @@ func TestRootVFSOperations(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to get file content: %v", err)
 		}
+
+		// Check for PHP errors
+		AssertNoPHPErrors(t, string(content))
+
 		if !strings.Contains(string(content), "Virtual content") {
 			t.Errorf("Unexpected file content: %s", string(content))
 		}
@@ -1153,6 +1173,10 @@ func TestBasicRequest(t *testing.T) {
 		t.Errorf("Expected output from test.php, got: %s", body)
 	}
 
+	// Check for PHP errors
+	bodyStr := string(body)
+	AssertNoPHPErrors(t, bodyStr)
+
 	// Check for proper logging
 	logs := logOutput.String()
 	expectedLogs := []string{
@@ -1528,6 +1552,9 @@ func TestScriptPathPatternExtraction(t *testing.T) {
 			resp := w.Result()
 			body, _ := io.ReadAll(resp.Body)
 			bodyStr := string(body)
+
+			// Check for PHP errors
+			AssertNoPHPErrors(t, bodyStr)
 
 			// Verify all expected parameters are found in the output
 			for paramName, paramValue := range tc.expectedParams {
