@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/dunglas/frankenphp"
 )
 
 // Middleware is the core Frango PHP middleware for Go applications
@@ -31,6 +33,9 @@ type Option func(*Middleware)
 // RenderData is a function that provides template data to a PHP script
 type RenderData func(w http.ResponseWriter, r *http.Request) map[string]interface{}
 
+// ContextKey is used for request context values
+type ContextKey string
+
 // New creates a new Frango PHP middleware instance
 func New(opts ...Option) (*Middleware, error) {
 	// Default configuration
@@ -39,6 +44,7 @@ func New(opts ...Option) (*Middleware, error) {
 		tempDir:            os.TempDir(),
 		logger:             log.New(os.Stderr, "[frango] ", log.LstdFlags),
 		blockDirectPHPURLs: true,
+		developmentMode:    true, // Default to development mode
 	}
 
 	// Apply all options
@@ -52,6 +58,20 @@ func New(opts ...Option) (*Middleware, error) {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	m.tempDir = instanceTempDir
+
+	// CRITICAL: Initialize FrankenPHP just once at middleware creation
+	// This ensures a single PHP process is available for all requests
+	m.initLock.Lock()
+	defer m.initLock.Unlock()
+
+	if !m.initialized {
+		m.logger.Println("Initializing FrankenPHP...")
+		if err := frankenphp.Init(); err != nil {
+			return nil, fmt.Errorf("error initializing FrankenPHP: %w", err)
+		}
+		m.initialized = true
+		m.logger.Println("FrankenPHP initialized successfully")
+	}
 
 	// Create initial root VFS if source dir is specified
 	if m.sourceDir != "" {
@@ -94,6 +114,13 @@ func (m *Middleware) Shutdown() {
 		m.rootVFS = nil
 	}
 
+	// CRITICAL: Properly shut down FrankenPHP
+	// Must be done once after we're done with the middleware
+	if m.initialized {
+		frankenphp.Shutdown()
+		m.initialized = false
+	}
+
 	// Clean up the temp directory
 	if m.tempDir != "" && m.tempDir != os.TempDir() {
 		m.logger.Printf("Cleaning up temp directory: %s", m.tempDir)
@@ -101,8 +128,6 @@ func (m *Middleware) Shutdown() {
 			m.logger.Printf("Error removing temp directory: %v", err)
 		}
 	}
-
-	m.initialized = false
 }
 
 // NewVFS creates a new virtual filesystem instance
@@ -285,7 +310,7 @@ func (m *Middleware) For(scriptPath string) http.Handler {
 		// Block direct access to .php URLs if configured
 		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
 			// Check if this is explicitly registered for this path pattern
-			pattern := php12PatternContextKey(r.Context())
+			pattern := extractPatternFromContext(r.Context())
 			if pattern == "" || !strings.HasSuffix(pattern, ".php") {
 				http.NotFound(w, r)
 				return
@@ -349,7 +374,7 @@ func (m *Middleware) ForVFS(vfs *VFS, scriptPath string) http.Handler {
 		// Block direct access to .php URLs if configured
 		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
 			// Check if this is explicitly registered for this path pattern
-			pattern := php12PatternContextKey(r.Context())
+			pattern := extractPatternFromContext(r.Context())
 			if pattern == "" || !strings.HasSuffix(pattern, ".php") {
 				http.NotFound(w, r)
 				return
@@ -413,15 +438,22 @@ func (m *Middleware) resolveScriptPath(scriptPath string) string {
 	return ""
 }
 
-// php12PatternContextKey extracts the pattern from the request context
+// extractPatternFromContext extracts the pattern from the request context
 // This is the key used by Go 1.22+ ServeMux to store the matched pattern
-func php12PatternContextKey(ctx context.Context) string {
+func extractPatternFromContext(ctx context.Context) string {
 	// Get the pattern from the context
 	if ctx == nil {
 		return ""
 	}
 
-	// Try our custom context key first
+	// Try our custom context key first (ContextKey)
+	if val := ctx.Value(ContextKey("pattern")); val != nil {
+		if pattern, ok := val.(string); ok {
+			return pattern
+		}
+	}
+
+	// For backward compatibility, also try the old phpContextKey
 	if val := ctx.Value(phpContextKey("pattern")); val != nil {
 		if pattern, ok := val.(string); ok {
 			return pattern

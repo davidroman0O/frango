@@ -1,11 +1,14 @@
 package frango
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -25,23 +28,22 @@ type RequestData struct {
 	FormData     map[string][]string
 }
 
-// ContextKey type is used for context value keys
-type ContextKey string
-
 // The path globals PHP script to be injected into VFS instances
 const pathGlobalsPHP = `<?php
-// Frango v1 path globals initialization
-// 
-// Initializes the following PHP superglobals:
-// - $_PATH: Contains path parameters extracted from URL patterns
-// - $_PATH_SEGMENTS: Contains URL path segments
-// - $_JSON: Contains parsed JSON request body
+/**
+ * PHP globals initialization
+ * 
+ * This file is automatically included in all PHP scripts executed by Frango.
+ * It initializes PHP superglobals and provides helper functions.
+ */
 
 // Initialize $_PATH superglobal for path parameters
+// This holds all parameters extracted from URL patterns like "/users/{id}"
+global $_PATH;
 if (!isset($_PATH)) {
     $_PATH = [];
     
-    // Load from JSON if available
+    // Load from JSON if available (preferred method)
     $pathParamsJson = $_SERVER['PHP_PATH_PARAMS'] ?? '{}';
     $decodedParams = json_decode($pathParamsJson, true);
     if (is_array($decodedParams)) {
@@ -63,6 +65,8 @@ if (!isset($_PATH)) {
 }
 
 // Initialize $_PATH_SEGMENTS superglobal for URL segments
+// Contains each segment of the URL path split by "/"
+global $_PATH_SEGMENTS;
 if (!isset($_PATH_SEGMENTS)) {
     $_PATH_SEGMENTS = [];
     
@@ -82,7 +86,9 @@ if (!isset($_PATH_SEGMENTS)) {
     $GLOBALS['_PATH_SEGMENT_COUNT'] = $segmentCount;
 }
 
-// Initialize $_JSON for parsed JSON request body
+// Initialize $_JSON superglobal for parsed JSON request body
+// Provides direct access to JSON data submitted in the request
+global $_JSON;
 if (!isset($_JSON)) {
     $_JSON = [];
     
@@ -97,48 +103,133 @@ if (!isset($_JSON)) {
     $GLOBALS['_JSON'] = $_JSON;
 }
 
-// Helper function to get path segments
+// Initialize $_FORM superglobal for form data
+// Similar to $_POST but guaranteed to contain form data regardless of request method
+global $_FORM;
+if (!isset($_FORM)) {
+    $_FORM = [];
+    
+    // Copy existing form data
+    $_FORM = $_POST;
+    
+    // Add PHP_FORM_ variables from $_SERVER
+    foreach ($_SERVER as $key => $value) {
+        if (strpos($key, 'PHP_FORM_') === 0) {
+            $formKey = substr($key, strlen('PHP_FORM_'));
+            $_FORM[$formKey] = $value;
+        }
+    }
+    
+    // Make sure $_FORM is globally accessible
+    $GLOBALS['_FORM'] = $_FORM;
+}
+
+// Initialize common helper functions
 if (!function_exists('path_segments')) {
+    /**
+     * Returns the URL path segments as an array
+     * @return array URL path segments
+     */
     function path_segments() {
         global $_PATH_SEGMENTS;
         return $_PATH_SEGMENTS;
     }
 }
 
+if (!function_exists('path_param')) {
+    /**
+     * Gets a path parameter with optional default value
+     * @param string $name Parameter name
+     * @param mixed $default Default value if parameter doesn't exist
+     * @return mixed Parameter value or default
+     */
+    function path_param($name, $default = null) {
+        global $_PATH;
+        return $_PATH[$name] ?? $default;
+    }
+}
+
+if (!function_exists('has_path_param')) {
+    /**
+     * Checks if a path parameter exists
+     * @param string $name Parameter name
+     * @return bool True if parameter exists
+     */
+    function has_path_param($name) {
+        global $_PATH;
+        return isset($_PATH[$name]);
+    }
+}
+
 // Initialize template variables from PHP_VAR_ environment variables
+// Makes template variables directly accessible as PHP variables
 foreach ($_SERVER as $key => $value) {
     if (strpos($key, 'PHP_VAR_') === 0) {
         $varName = substr($key, strlen('PHP_VAR_'));
         $varValue = json_decode($value, true);
+        
+        // Set variable in global scope for direct access
         $GLOBALS[$varName] = $varValue;
+        
+        // Also make available as a superglobal array
+        if (!isset($GLOBALS['_TEMPLATE'])) {
+            $GLOBALS['_TEMPLATE'] = [];
+        }
+        $GLOBALS['_TEMPLATE'][$varName] = $varValue;
     }
 }
+
+// Make common request data easily accessible
+global $_URL, $_CURRENT_URL, $_QUERY;
+$_URL = $_SERVER['PHP_PATH'] ?? $_SERVER['REQUEST_URI'] ?? '';
+$_CURRENT_URL = $_SERVER['REQUEST_URI'] ?? '';
+$_QUERY = $_GET;
+
+$GLOBALS['_URL'] = $_URL;
+$GLOBALS['_CURRENT_URL'] = $_CURRENT_URL;
+$GLOBALS['_QUERY'] = $_QUERY;
 `
 
 // ExecutePHP handles execution of a PHP script through the VFS
+// This version closely mimics the behavior of the original working version
 func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData, w http.ResponseWriter, r *http.Request) {
+	m.logger.Printf("========== EXECUTING PHP SCRIPT ==========")
+	m.logger.Printf("ExecutePHP: Executing script '%s' with VFS %s", scriptPath, vfs.name)
+	m.logger.Printf("ExecutePHP: HTTP Request %s %s", r.Method, r.URL.String())
+
 	// 1. Extract all request data in a clean step
 	requestData := extractRequestData(r)
 
-	// 2. Prepare environment variables
+	// 2. Prepare environment variables that will be used to create PHP superglobals
+	// We now use PHP_ prefixes as specified in the roadmap for a more PHP-friendly approach
 	envData := make(map[string]string)
 
-	// Add path segments (array indexes start at 0)
+	// --- URL AND PATH SEGMENTS ---
+	// These become $_PATH_SEGMENTS in PHP
 	for i, segment := range requestData.PathSegments {
 		envData["PHP_PATH_SEGMENT_"+strconv.Itoa(i)] = segment
 	}
-
-	// Also provide the number of segments
 	envData["PHP_PATH_SEGMENT_COUNT"] = strconv.Itoa(len(requestData.PathSegments))
-
-	// Add raw path
 	envData["PHP_PATH"] = requestData.Path
 
-	// --- Extract path parameters from pattern ---
+	// --- PATH PARAMETERS ---
+	// These become $_PATH in PHP
 	var pathParams map[string]string
 
-	// Get the actual route pattern from the request's context if available
-	if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
+	// First try to get pattern from context (for backward compatibility)
+	patternKey := extractPatternFromContext(r.Context())
+
+	// If no pattern in context, try to extract it from the script path
+	if patternKey == "" {
+		// Remove file extension to get the pattern
+		scriptExt := filepath.Ext(scriptPath)
+		patternKey = strings.TrimSuffix(scriptPath, scriptExt)
+		m.logger.Printf("No pattern in context, extracted pattern from script path: %s", patternKey)
+	}
+
+	if patternKey != "" {
+		m.logger.Printf("Using pattern: %s", patternKey)
+
 		// Use the pattern to extract path parameters
 		pathParams = extractPathParams(patternKey, requestData.Path)
 
@@ -152,39 +243,57 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 			if jsonParams, err := json.Marshal(pathParams); err == nil {
 				envData["PHP_PATH_PARAMS"] = string(jsonParams)
 			}
-		}
 
-		m.logger.Printf("Extracted path parameters: %v", pathParams)
+			m.logger.Printf("Extracted path parameters: %v", pathParams)
+		}
 	} else {
-		// Check for any path parameters set in environment variables (for tests)
-		paramsJSON := os.Getenv("PHP_PATH_PARAMS")
-		if paramsJSON != "" {
-			m.logger.Printf("Found PHP_PATH_PARAMS in environment: %s", paramsJSON)
-			envData["PHP_PATH_PARAMS"] = paramsJSON
-		}
+		m.logger.Printf("No pattern available, using URL path without parameter extraction: %s", requestData.Path)
+	}
 
-		// Check for individual parameter variables
-		for _, env := range os.Environ() {
-			if strings.HasPrefix(env, "PHP_PATH_PARAM_") {
-				parts := strings.SplitN(env, "=", 2)
-				if len(parts) == 2 {
-					key := parts[0]
-					value := parts[1]
-					m.logger.Printf("Found param in environment: %s=%s", key, value)
-					envData[key] = value
-				}
-			}
+	// --- QUERY PARAMETERS ---
+	// These become available in both $_GET and $_QUERY in PHP
+	for key, values := range requestData.QueryParams {
+		if len(values) > 0 {
+			envData["PHP_QUERY_"+key] = values[0]
 		}
 	}
 
-	// Add JSON body if available
+	// --- FORM DATA ---
+	// These become available in $_FORM in PHP
+	for key, values := range requestData.FormData {
+		if len(values) > 0 && !strings.HasPrefix(key, "PHP_") { // Avoid overrides
+			envData["PHP_FORM_"+key] = values[0]
+		}
+	}
+
+	// --- JSON BODY ---
+	// This becomes $_JSON in PHP
 	if requestData.JSONBody != nil {
+		// Add individual JSON fields with PHP_JSON_ prefix
+		for key, value := range requestData.JSONBody {
+			// Convert each JSON value to string
+			if strValue, err := json.Marshal(value); err == nil {
+				envData["PHP_JSON_"+key] = string(strValue)
+			}
+		}
+
+		// Also provide the full JSON body
 		if fullJSON, err := json.Marshal(requestData.JSONBody); err == nil {
 			envData["PHP_JSON"] = string(fullJSON)
 		}
 	}
 
-	// Populate render data if renderFn is provided
+	// --- REQUEST HEADERS ---
+	// These become available as PHP_HEADER_* variables in $_SERVER
+	for key, values := range requestData.Headers {
+		if len(values) > 0 {
+			headerKey := strings.ReplaceAll(strings.ToUpper(key), "-", "_")
+			envData["PHP_HEADER_"+headerKey] = values[0]
+		}
+	}
+
+	// --- TEMPLATE VARIABLES ---
+	// These become direct variables in PHP global scope and also in $_TEMPLATE
 	if renderFn != nil {
 		m.logger.Printf("Calling render function")
 		data := renderFn(w, r)
@@ -227,38 +336,70 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 		return
 	}
 
-	// 5. Prepare FrankenPHP request options
-	// Document root is the PARENT directory of the script
-	documentRoot := filepath.Dir(phpFilePath)
-	scriptName := "/" + filepath.Base(phpFilePath) // Just the filename with leading slash
-
-	m.logger.Printf("FrankenPHP Setup: DocumentRoot='%s', ScriptName='%s', URL='%s'", documentRoot, scriptName, r.URL.String())
-
-	// Access PHP globals file from VFS (should be injected during initialization)
-	pathGlobalsFile, pathGlobalsErr := vfs.ResolvePath("/_frango_php_globals.php")
-	if pathGlobalsErr != nil {
-		// If the globals file doesn't exist yet, create it
-		m.logger.Printf("Creating PHP globals file in VFS")
-		err := vfs.CreateVirtualFile("/_frango_php_globals.php", []byte(pathGlobalsPHP))
-		if err != nil {
-			m.logger.Printf("Warning: Failed to create PHP globals file: %v", err)
-		} else {
-			pathGlobalsFile, _ = vfs.ResolvePath("/_frango_php_globals.php")
+	// CRITICAL: Create the path globals PHP file if it doesn't exist
+	// This file initializes $_PATH, $_PATH_SEGMENTS, and other PHP superglobals
+	pathGlobalsFile := filepath.Join(vfs.tempDir, "_frango_path_globals.php")
+	if _, err := os.Stat(pathGlobalsFile); err != nil {
+		// Create the path globals file if it doesn't exist
+		m.logger.Printf("Creating path globals file: %s", pathGlobalsFile)
+		if err := os.WriteFile(pathGlobalsFile, []byte(pathGlobalsPHP), 0644); err != nil {
+			m.logger.Printf("Warning: Failed to create path globals file: %v", err)
 		}
 	}
 
-	// Add auto-prepend file to include path globals if available
-	if pathGlobalsFile != "" {
-		m.logger.Printf("Adding path globals auto-prepend: %s", pathGlobalsFile)
-		envData["PHP_AUTO_PREPEND_FILE"] = pathGlobalsFile
+	// CRITICAL: The auto-prepend approach isn't working reliably
+	// Instead, we'll directly include the globals file at the top of the PHP script
+	// First, read the current script content
+	scriptContent, err := os.ReadFile(phpFilePath)
+	if err != nil {
+		m.logger.Printf("Error reading PHP script: %v", err)
+		http.Error(w, "Server error reading PHP script", http.StatusInternalServerError)
+		return
 	}
+
+	// Prepend our globals file by inserting a require statement at the beginning
+	// Find the opening PHP tag
+	phpTagIndex := bytes.Index(scriptContent, []byte("<?php"))
+	if phpTagIndex >= 0 {
+		// Insert right after the opening PHP tag
+		includeStatement := []byte("\nrequire_once '" + pathGlobalsFile + "';\n")
+		newContent := append(scriptContent[:phpTagIndex+5], append(includeStatement, scriptContent[phpTagIndex+5:]...)...)
+
+		// Write the modified content back to the file
+		if err := os.WriteFile(phpFilePath, newContent, 0644); err != nil {
+			m.logger.Printf("Error writing modified PHP script: %v", err)
+			http.Error(w, "Server error modifying PHP script", http.StatusInternalServerError)
+			return
+		}
+		m.logger.Printf("Added direct include of globals file to script")
+	}
+
+	// CRITICAL: Set up document root and script name correctly for FrankenPHP
+	// Document root must be the parent directory of the script
+	documentRoot := filepath.Dir(phpFilePath)
+
+	// CRITICAL: Script name must be the basename with a leading slash
+	// This is required for FrankenPHP to properly locate the script
+	scriptName := "/" + filepath.Base(phpFilePath)
+
+	m.logger.Printf("Executing PHP script in env: '%s' (from source: '%s')", phpFilePath, scriptPath)
+	m.logger.Printf("FrankenPHP Setup: DocumentRoot='%s', ScriptName='%s', URL='%s'", documentRoot, scriptName, r.URL.String())
+
+	// CRITICAL: Set auto-prepend and include path for PHP globals
+	m.logger.Printf("Adding path globals auto-prepend: %s", pathGlobalsFile)
+	envData["PHP_AUTO_PREPEND_FILE"] = pathGlobalsFile
+	envData["PHP_INCLUDE_PATH"] = vfs.tempDir
 
 	// Inject envData (render vars, path params) and query params
 	phpBaseEnv := map[string]string{
-		// *** DO NOT SET SCRIPT_FILENAME here *** - Rely on DocRoot + modified request path
-		"SCRIPT_NAME":    scriptName,          // e.g., /index.php
+		// CRITICAL: Set SCRIPT_FILENAME explicitly to the absolute file path
+		// This is THE most important environment variable for PHP execution
+		"SCRIPT_FILENAME": phpFilePath, // Absolute path to the script
+
+		// CRITICAL: These environment variables must be set correctly
+		"SCRIPT_NAME":    scriptName,          // Must match the basename of the script
 		"PHP_SELF":       scriptName,          // Match SCRIPT_NAME
-		"DOCUMENT_ROOT":  documentRoot,        // Parent dir of script
+		"DOCUMENT_ROOT":  documentRoot,        // Must be the parent directory of the script
 		"REQUEST_URI":    requestData.FullURL, // Use the same full URL
 		"REQUEST_METHOD": requestData.Method,
 		"QUERY_STRING":   r.URL.RawQuery,
@@ -269,31 +410,51 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 		"DEBUG_SCRIPT_NAME":   scriptName,
 		"DEBUG_PHP_FILE_PATH": phpFilePath, // Full path for debugging
 		"DEBUG_SOURCE_PATH":   scriptPath,
+		"DEBUG_ENV_ID":        vfs.name,
 	}
 
-	// Add in all our extracted data
+	// Add in all our extracted data (with PHP_ prefixes)
 	for key, value := range envData {
 		phpBaseEnv[key] = value
 	}
 
+	// Set up PHP configuration options
 	if !m.developmentMode {
 		phpBaseEnv["PHP_OPCACHE_ENABLE"] = "1"
 	} else {
 		phpBaseEnv["PHP_FCGI_MAX_REQUESTS"] = "1"
 	}
+
+	// Set explicit PHP timeouts to prevent hanging
+	phpBaseEnv["PHP_MAX_EXECUTION_TIME"] = "10" // 10 second timeout
+	phpBaseEnv["PHP_DEFAULT_SOCKET_TIMEOUT"] = "10"
+
 	m.logger.Printf("Total PHP environment variables: %d", len(phpBaseEnv))
 
-	// 6. Create and execute FrankenPHP request
+	// CRITICAL: Modify the request clone path to match the script name
+	// This ensures FrankenPHP looks for the correct file
 	reqClone := r.Clone(r.Context())
-	// *** Modify the cloned request path to match the script name ***
 	reqClone.URL.Path = scriptName
 	m.logger.Printf("Modified request clone path for FrankenPHP: %s", reqClone.URL.Path)
 
-	// Create and execute the FrankenPHP request
+	// Dump all environment variables in sorted order for debugging
+	m.logger.Printf("ExecutePHP: ======= FULL PHP ENVIRONMENT =======")
+	var keys []string
+	for k := range phpBaseEnv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := phpBaseEnv[k]
+		m.logger.Printf("  %s = %s", k, v)
+	}
+	m.logger.Printf("ExecutePHP: ===================================")
+
+	// CRITICAL: Create FrankenPHP request with exact document root and environment
 	req, err := frankenphp.NewRequestWithContext(
-		reqClone,
-		frankenphp.WithRequestDocumentRoot(documentRoot, false),
-		frankenphp.WithRequestEnv(phpBaseEnv),
+		reqClone, // Use the modified request with the script path
+		frankenphp.WithRequestDocumentRoot(documentRoot, false), // Exact document root
+		frankenphp.WithRequestEnv(phpBaseEnv),                   // All environment variables
 	)
 	if err != nil {
 		m.logger.Printf("Error creating PHP request: %v", err)
@@ -301,11 +462,15 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 		return
 	}
 
+	// Execute the PHP script
 	if err := frankenphp.ServeHTTP(w, req); err != nil {
 		m.logger.Printf("Error executing PHP script '%s': %v", phpFilePath, err)
-		http.Error(w, "PHP execution error: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("PHP execution error: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	m.logger.Printf("PHP execution completed successfully for '%s'", scriptPath)
+	m.logger.Printf("========== PHP EXECUTION COMPLETE ==========")
 }
 
 // extractRequestData extracts all relevant data from an HTTP request
@@ -386,7 +551,7 @@ func extractPathParams(pattern, path string) map[string]string {
 		if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
 			// Extract parameter name without braces
 			paramName := patternSegment[1 : len(patternSegment)-1]
-			if paramName != "" && paramName != "$" { // Skip special {$} if it exists
+			if paramName != "" {
 				// Use actual path segment as parameter value
 				params[paramName] = pathSegments[i]
 			}
@@ -407,3 +572,7 @@ func getMapKeys(m map[string]interface{}) []string {
 	}
 	return keys
 }
+
+// extractPatternFromContext extracts the URL pattern from the request context
+
+// Define the pattern key type for context values

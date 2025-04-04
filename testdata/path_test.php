@@ -8,7 +8,7 @@ if (!isset($_PATH)) {
     $_PATH = [];
     
     // Load from JSON if available
-    $pathParamsJson = $_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? '{}';
+    $pathParamsJson = $_SERVER['PHP_PATH_PARAMS'] ?? '{}';
     
     // Decode JSON parameters
     $decodedParams = json_decode($pathParamsJson, true);
@@ -17,10 +17,10 @@ if (!isset($_PATH)) {
         $_PATH = $decodedParams;
     }
     
-    // Also add any FRANGO_PARAM_ variables from $_SERVER for backward compatibility
+    // Also add any PHP_PATH_PARAM_ variables from $_SERVER
     foreach ($_SERVER as $key => $value) {
-        if (strpos($key, 'FRANGO_PARAM_') === 0) {
-            $paramName = substr($key, strlen('FRANGO_PARAM_'));
+        if (strpos($key, 'PHP_PATH_PARAM_') === 0) {
+            $paramName = substr($key, strlen('PHP_PATH_PARAM_'));
             if (!isset($_PATH[$paramName])) {
                 $_PATH[$paramName] = $value;
             }
@@ -33,11 +33,11 @@ if (!isset($_PATH_SEGMENTS)) {
     $_PATH_SEGMENTS = [];
     
     // Get segment count
-    $segmentCount = intval($_SERVER['FRANGO_URL_SEGMENT_COUNT'] ?? 0);
+    $segmentCount = intval($_SERVER['PHP_PATH_SEGMENT_COUNT'] ?? 0);
     
     // Add segments to array
     for ($i = 0; $i < $segmentCount; $i++) {
-        $segmentKey = "FRANGO_URL_SEGMENT_$i";
+        $segmentKey = "PHP_PATH_SEGMENT_$i";
         if (isset($_SERVER[$segmentKey])) {
             $_PATH_SEGMENTS[] = $_SERVER[$segmentKey];
         }
@@ -72,7 +72,7 @@ echo "\n";
 
 // Show backward compatibility
 echo "Backward Compatibility Test:\n";
-echo "userId via \$_SERVER['FRANGO_PARAM_userId']: " . ($_SERVER['FRANGO_PARAM_userId'] ?? 'not set') . "\n";
+echo "userId via \$_SERVER['PHP_PATH_PARAM_userId']: " . ($_SERVER['PHP_PATH_PARAM_userId'] ?? 'not set') . "\n";
 echo "userId via \$_PATH['userId']: " . ($_PATH['userId'] ?? 'not set') . "\n";
 echo "\n";
 
@@ -84,5 +84,5 @@ echo "\n";
 
 // Debug output for troubleshooting
 echo "\nDebug Info:\n";
-echo "FRANGO_PATH_PARAMS_JSON: " . ($_SERVER['FRANGO_PATH_PARAMS_JSON'] ?? 'not set') . "\n";
+echo "PHP_PATH_PARAMS: " . ($_SERVER['PHP_PATH_PARAMS'] ?? 'not set') . "\n";
 echo "PHP_AUTO_PREPEND_FILE: " . ($_SERVER['PHP_AUTO_PREPEND_FILE'] ?? 'not set') . "\n"; 
