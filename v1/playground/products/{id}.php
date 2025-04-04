@@ -3,6 +3,33 @@
  * Product Detail Page
  * Demonstrates path parameter extraction and query string parameters
  */
+
+// Initialize superglobals if they don't exist
+if (!isset($_PATH)) $_PATH = [];
+if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
+if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
+
+// Define helper functions if they don't exist
+if (!function_exists('path_segments')) {
+    function path_segments() {
+        global $_PATH_SEGMENTS;
+        return $_PATH_SEGMENTS;
+    }
+}
+
+if (!function_exists('path_param')) {
+    function path_param($name, $default = null) {
+        global $_PATH;
+        return isset($_PATH[$name]) ? $_PATH[$name] : $default;
+    }
+}
+
+if (!function_exists('has_path_param')) {
+    function has_path_param($name) {
+        global $_PATH;
+        return isset($_PATH[$name]);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -67,18 +94,21 @@
     <div class="card">
         <h3>Try Different Colors:</h3>
         <p>
-            <a href="/products/<?= $_PATH['id'] ?>?color=red">Red</a> |
-            <a href="/products/<?= $_PATH['id'] ?>?color=blue">Blue</a> |
-            <a href="/products/<?= $_PATH['id'] ?>?color=green">Green</a> |
-            <a href="/products/<?= $_PATH['id'] ?>?color=purple">Purple</a> |
-            <a href="/products/<?= $_PATH['id'] ?>?color=orange">Orange</a>
+            <a href="/products/<?= $_PATH['id'] ?? '1' ?>?color=red">Red</a> |
+            <a href="/products/<?= $_PATH['id'] ?? '1' ?>?color=blue">Blue</a> |
+            <a href="/products/<?= $_PATH['id'] ?? '1' ?>?color=green">Green</a> |
+            <a href="/products/<?= $_PATH['id'] ?? '1' ?>?color=purple">Purple</a> |
+            <a href="/products/<?= $_PATH['id'] ?? '1' ?>?color=orange">Orange</a>
         </p>
     </div>
     
     <div class="card">
         <h3>Navigation:</h3>
         <p><a href="/">Back to Home</a></p>
-        <p><a href="/nested/deep/path?ref=product&id=<?= $_PATH['id'] ?>">Go to Deep Nested Path</a></p>
+        <p><a href="/nested/deep/path?ref=product&id=<?= $_PATH['id'] ?? '1' ?>">Go to Deep Nested Path</a></p>
+        <p><a href="/forms/">Try Form Handling Examples</a></p>
     </div>
+    
+    <?php include_once(__DIR__ . '/../debug_panel.php'); ?>
 </body>
 </html> 

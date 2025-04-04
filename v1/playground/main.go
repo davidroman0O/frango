@@ -13,6 +13,8 @@ import (
 //go:embed products/*.php
 //go:embed nested/deep/path/*.php
 //go:embed categories/**/*.php
+//go:embed forms/*.php
+//go:embed debug_panel.php
 var phpFiles embed.FS
 
 func main() {
@@ -31,21 +33,34 @@ func main() {
 	// Create a standard HTTP mux
 	mux := http.NewServeMux()
 
-	// Simple routes with automatic parameter extraction
-	mux.Handle("/", php.For("/index.php"))
+	// Form specific routes - explicit mappings for each form endpoint
+	mux.Handle("/forms/form_display", php.For("/forms/form_display.php"))
+	mux.Handle("/forms/post_display", php.For("/forms/post_display.php"))
+	mux.Handle("/forms/get_display", php.For("/forms/get_display.php"))
+	mux.Handle("/forms/upload_display", php.For("/forms/upload_display.php"))
+
+	// For form submissions using the hyphenated convention
+	mux.Handle("/forms/form-post", php.For("/forms/form-post.php"))
+	mux.Handle("/forms/form-get", php.For("/forms/form-get.php"))
+	mux.Handle("/forms/form-upload", php.For("/forms/form-upload.php"))
+
+	// Debug pages
+	mux.Handle("/debug.php", php.For("/debug.php"))
+	mux.Handle("/forms/form_debug.php", php.For("/forms/form_debug.php"))
+
+	// Default routes
+	mux.Handle("/forms", php.For("/forms/index.php"))
+	mux.Handle("/forms/", php.For("/forms/index.php"))
 	mux.Handle("/users/", php.For("/users/{id}.php"))
 	mux.Handle("/products/", php.For("/products/{id}.php"))
-	mux.Handle("/nested/", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/path", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/path/", php.For("/nested/deep/path/index.php"))
 	mux.Handle("/categories/", php.For("/categories/{category}/{subcategory}.php"))
 
-	// Start the server
-	log.Println("Starting playground server at http://localhost:8080")
-	log.Println("Try these routes:")
-	log.Println("  - / (Home page with debug info)")
-	log.Println("  - /users/123 (User profile with ID parameter)")
-	log.Println("  - /products/456?color=red (Product with ID and query param)")
-	log.Println("  - /nested/deep/path (Deeply nested path)")
-	log.Println("  - /categories/electronics/laptops (Multiple path parameters)")
+	// Root route
+	mux.Handle("/", php.For("/index.php"))
 
-	http.ListenAndServe(":8080", mux)
+	// Start the server
+	log.Println("Server starting on http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }

@@ -1,6 +1,4 @@
 <?php
-require_once '/var/folders/h2/lww7d7p5049dx4qzhxgk33640000gn/T/frango-030fb10b/vfs-c30251ec/_frango_path_globals.php';
-
 		echo "This is a test PHP file";
 		
 		// Display any path parameters that might be set

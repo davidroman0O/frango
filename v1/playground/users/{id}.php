@@ -3,6 +3,33 @@
  * User Profile Page
  * Demonstrates path parameter extraction from URL patterns like /users/{id}
  */
+
+// Initialize superglobals if they don't exist
+if (!isset($_PATH)) $_PATH = [];
+if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
+if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
+
+// Define helper functions if they don't exist
+if (!function_exists('path_segments')) {
+    function path_segments() {
+        global $_PATH_SEGMENTS;
+        return $_PATH_SEGMENTS;
+    }
+}
+
+if (!function_exists('path_param')) {
+    function path_param($name, $default = null) {
+        global $_PATH;
+        return isset($_PATH[$name]) ? $_PATH[$name] : $default;
+    }
+}
+
+if (!function_exists('has_path_param')) {
+    function has_path_param($name) {
+        global $_PATH;
+        return isset($_PATH[$name]);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -58,5 +85,7 @@
         <p><a href="/">Back to Home</a></p>
         <p><a href="/products/<?= $_PATH['id'] ?? '1' ?>">View User's Products</a></p>
     </div>
+    
+    <?php include_once(__DIR__ . '/../debug_panel.php'); ?>
 </body>
 </html> 

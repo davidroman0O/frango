@@ -1,7 +1,6 @@
 package frango
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -198,6 +197,11 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	m.logger.Printf("ExecutePHP: Executing script '%s' with VFS %s", scriptPath, vfs.name)
 	m.logger.Printf("ExecutePHP: HTTP Request %s %s", r.Method, r.URL.String())
 
+	// Ensure the VFS has the PHP globals script installed
+	if err := UpdateVFS(vfs); err != nil {
+		m.logger.Printf("Warning: Failed to update VFS with PHP globals: %v", err)
+	}
+
 	// 1. Extract all request data in a clean step
 	requestData := extractRequestData(r)
 
@@ -380,62 +384,6 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 		}
 	}
 
-	// 4. Verify script file exists
-	fileInfo, err := os.Stat(phpFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			m.logger.Printf("PHP script not found: '%s'", phpFilePath)
-			http.NotFound(w, r)
-			return
-		}
-		m.logger.Printf("Error stating PHP script '%s': %v", phpFilePath, err)
-		http.Error(w, "Server error locating script", http.StatusInternalServerError)
-		return
-	}
-	if fileInfo.IsDir() {
-		m.logger.Printf("ERROR: Target script path is a directory: '%s'", phpFilePath)
-		http.Error(w, "Configuration error: script path is a directory", http.StatusInternalServerError)
-		return
-	}
-
-	// CRITICAL: Create the path globals PHP file if it doesn't exist
-	// This file initializes $_PATH, $_PATH_SEGMENTS, and other PHP superglobals
-	pathGlobalsFile := filepath.Join(vfs.tempDir, "_frango_path_globals.php")
-	if _, err := os.Stat(pathGlobalsFile); err != nil {
-		// Create the path globals file if it doesn't exist
-		m.logger.Printf("Creating path globals file: %s", pathGlobalsFile)
-		if err := os.WriteFile(pathGlobalsFile, []byte(pathGlobalsPHP), 0644); err != nil {
-			m.logger.Printf("Warning: Failed to create path globals file: %v", err)
-		}
-	}
-
-	// CRITICAL: The auto-prepend approach isn't working reliably
-	// Instead, we'll directly include the globals file at the top of the PHP script
-	// First, read the current script content
-	scriptContent, err := os.ReadFile(phpFilePath)
-	if err != nil {
-		m.logger.Printf("Error reading PHP script: %v", err)
-		http.Error(w, "Server error reading PHP script", http.StatusInternalServerError)
-		return
-	}
-
-	// Prepend our globals file by inserting a require statement at the beginning
-	// Find the opening PHP tag
-	phpTagIndex := bytes.Index(scriptContent, []byte("<?php"))
-	if phpTagIndex >= 0 {
-		// Insert right after the opening PHP tag
-		includeStatement := []byte("\nrequire_once '" + pathGlobalsFile + "';\n")
-		newContent := append(scriptContent[:phpTagIndex+5], append(includeStatement, scriptContent[phpTagIndex+5:]...)...)
-
-		// Write the modified content back to the file
-		if err := os.WriteFile(phpFilePath, newContent, 0644); err != nil {
-			m.logger.Printf("Error writing modified PHP script: %v", err)
-			http.Error(w, "Server error modifying PHP script", http.StatusInternalServerError)
-			return
-		}
-		m.logger.Printf("Added direct include of globals file to script")
-	}
-
 	// CRITICAL: Set up document root and script name correctly for FrankenPHP
 	// Document root must be the parent directory of the script
 	documentRoot := filepath.Dir(phpFilePath)
@@ -447,10 +395,29 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	m.logger.Printf("Executing PHP script in env: '%s' (from source: '%s')", phpFilePath, scriptPath)
 	m.logger.Printf("FrankenPHP Setup: DocumentRoot='%s', ScriptName='%s', URL='%s'", documentRoot, scriptName, r.URL.String())
 
-	// CRITICAL: Set auto-prepend and include path for PHP globals
-	m.logger.Printf("Adding path globals auto-prepend: %s", pathGlobalsFile)
-	envData["PHP_AUTO_PREPEND_FILE"] = pathGlobalsFile
-	envData["PHP_INCLUDE_PATH"] = vfs.tempDir
+	// CRITICAL: Create a wrapper script that explicitly includes the globals file
+	// This ensures our PHP superglobals are properly initialized
+	wrapperPath := filepath.Join(filepath.Dir(phpFilePath), "_wrapper_"+filepath.Base(phpFilePath))
+	globalsFilePath := filepath.Join(vfs.tempDir, "_frango_php_globals.php")
+
+	// Create a temporary wrapper script that includes the globals and then the main script
+	// Using require_once instead of include to ensure globals are loaded even if the script has an error
+	wrapperContent := fmt.Sprintf(`<?php
+// Auto-generated wrapper to ensure PHP superglobals are initialized
+require_once '%s'; // Load globals initialization
+include '%s'; // Load main script
+?>`, globalsFilePath, phpFilePath)
+
+	// Write the wrapper script
+	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
+		m.logger.Printf("Warning: Failed to create PHP globals wrapper script: %v", err)
+	} else {
+		// Use the wrapper script instead of the original
+		phpFilePath = wrapperPath
+		// Update the script name to use the wrapper
+		scriptName = "/" + filepath.Base(wrapperPath)
+		m.logger.Printf("Created PHP globals wrapper script: %s", wrapperPath)
+	}
 
 	// Inject envData (render vars, path params) and query params
 	phpBaseEnv := map[string]string{
@@ -481,10 +448,10 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	}
 
 	// Set up PHP configuration options
-	if !m.developmentMode {
-		phpBaseEnv["PHP_OPCACHE_ENABLE"] = "1"
+	if m.developmentMode {
+		phpBaseEnv["PHP_FCGI_MAX_REQUESTS"] = "1" // Disable PHP-FPM keepalive
 	} else {
-		phpBaseEnv["PHP_FCGI_MAX_REQUESTS"] = "1"
+		phpBaseEnv["PHP_OPCACHE_ENABLE"] = "1" // Enable opcache in production
 	}
 
 	// Set explicit PHP timeouts to prevent hanging

@@ -3,6 +3,33 @@
  * Categories Page
  * Demonstrates multiple path parameters and segment extraction
  */
+
+// Initialize superglobals if they don't exist
+if (!isset($_PATH)) $_PATH = [];
+if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
+if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
+
+// Define helper functions if they don't exist
+if (!function_exists('path_segments')) {
+    function path_segments() {
+        global $_PATH_SEGMENTS;
+        return $_PATH_SEGMENTS;
+    }
+}
+
+if (!function_exists('path_param')) {
+    function path_param($name, $default = null) {
+        global $_PATH;
+        return isset($_PATH[$name]) ? $_PATH[$name] : $default;
+    }
+}
+
+if (!function_exists('has_path_param')) {
+    function has_path_param($name) {
+        global $_PATH;
+        return isset($_PATH[$name]);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -54,7 +81,7 @@
         <div class="breadcrumb">
             <strong>You are browsing:</strong>
             <a href="/">Home</a> &raquo; 
-            <a href="/categories/<?= $_PATH['category'] ?>">
+            <a href="/categories/<?= $_PATH['category'] ?? 'all' ?>">
                 <span class="path-param"><?= htmlspecialchars($_PATH['category'] ?? 'all') ?></span>
             </a> &raquo; 
             <span class="path-param"><?= htmlspecialchars($_PATH['subcategory'] ?? 'all') ?></span>
@@ -89,6 +116,9 @@
         <h3>Navigation:</h3>
         <p><a href="/">Back to Home</a></p>
         <p><a href="/nested/deep/path">Go to Nested Path Example</a></p>
+        <p><a href="/forms/">Try Form Handling Examples</a></p>
     </div>
+    
+    <?php include_once(__DIR__ . '/../../debug_panel.php'); ?>
 </body>
 </html> 

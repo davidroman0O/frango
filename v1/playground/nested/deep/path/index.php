@@ -3,6 +3,34 @@
  * Deeply Nested Path Example
  * Demonstrates how path segments are handled in deeply nested paths
  */
+
+// Initialize superglobals if they don't exist
+if (!isset($_PATH)) $_PATH = [];
+if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
+if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
+if (!isset($_URL)) $_URL = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+
+// Define helper functions if they don't exist
+if (!function_exists('path_segments')) {
+    function path_segments() {
+        global $_PATH_SEGMENTS;
+        return $_PATH_SEGMENTS;
+    }
+}
+
+if (!function_exists('path_param')) {
+    function path_param($name, $default = null) {
+        global $_PATH;
+        return isset($_PATH[$name]) ? $_PATH[$name] : $default;
+    }
+}
+
+if (!function_exists('has_path_param')) {
+    function has_path_param($name) {
+        global $_PATH;
+        return isset($_PATH[$name]);
+    }
+}
 ?>
 <!DOCTYPE html>
 <html>
@@ -86,6 +114,9 @@
             <p><a href="/products/<?= htmlspecialchars($_GET['id']) ?>">Back to Product #<?= htmlspecialchars($_GET['id']) ?></a></p>
         <?php endif; ?>
         <p><a href="/categories/electronics/laptops">Browse Categories</a></p>
+        <p><a href="/forms/">Try Form Handling Examples</a></p>
     </div>
+    
+    <?php include_once(__DIR__ . '/../../../debug_panel.php'); ?>
 </body>
 </html> 

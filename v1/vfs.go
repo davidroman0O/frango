@@ -980,97 +980,12 @@ func (v *VFS) checkForChanges() {
 
 // initializeGlobals creates the PHP globals file in the VFS
 func (v *VFS) initializeGlobals() error {
-	// Path globals PHP file - this is the content of the file
-	pathGlobalsContent := `<?php
-/**
- * Frango v1 path globals initialization
- * 
- * Initializes the following PHP superglobals:
- * - $_PATH: Contains path parameters extracted from URL patterns
- * - $_PATH_SEGMENTS: Contains URL path segments
- */
-
-// Initialize $_PATH superglobal for path parameters
-if (!isset($_PATH)) {
-    $_PATH = [];
-    
-    // Load from JSON if available
-    $pathParamsJson = $_SERVER['PHP_PATH_PARAMS'] ?? '{}';
-    $decodedParams = json_decode($pathParamsJson, true);
-    if (is_array($decodedParams)) {
-        $_PATH = $decodedParams;
-    }
-    
-    // Also add any PHP_PATH_PARAM_ variables from $_SERVER for backward compatibility
-    foreach ($_SERVER as $key => $value) {
-        if (strpos($key, 'PHP_PATH_PARAM_') === 0) {
-            $paramName = substr($key, strlen('PHP_PATH_PARAM_'));
-            if (!isset($_PATH[$paramName])) {
-                $_PATH[$paramName] = $value;
-            }
-        }
-    }
-    
-    // Make sure $_PATH is globally accessible
-    $GLOBALS['_PATH'] = $_PATH;
-}
-
-// Initialize $_PATH_SEGMENTS superglobal for URL segments
-if (!isset($_PATH_SEGMENTS)) {
-    $_PATH_SEGMENTS = [];
-    
-    // Get segment count
-    $segmentCount = intval($_SERVER['PHP_PATH_SEGMENT_COUNT'] ?? 0);
-    
-    // Add segments to array
-    for ($i = 0; $i < $segmentCount; $i++) {
-        $segmentKey = "PHP_PATH_SEGMENT_$i";
-        if (isset($_SERVER[$segmentKey])) {
-            $_PATH_SEGMENTS[] = $_SERVER[$segmentKey];
-        }
-    }
-    
-    // Make sure $_PATH_SEGMENTS is globally accessible
-    $GLOBALS['_PATH_SEGMENTS'] = $_PATH_SEGMENTS;
-    $GLOBALS['_PATH_SEGMENT_COUNT'] = $segmentCount;
-}
-
-// Initialize $_JSON for parsed JSON request body
-if (!isset($_JSON)) {
-    $_JSON = [];
-    
-    // Load from JSON if available
-    $jsonBody = $_SERVER['PHP_JSON'] ?? '{}';
-    $decodedJson = json_decode($jsonBody, true);
-    if (is_array($decodedJson)) {
-        $_JSON = $decodedJson;
-    }
-    
-    // Make sure $_JSON is globally accessible
-    $GLOBALS['_JSON'] = $_JSON;
-}
-
-// Helper function to get path segments
-if (!function_exists('path_segments')) {
-    function path_segments() {
-        global $_PATH_SEGMENTS;
-        return $_PATH_SEGMENTS;
-    }
-}
-
-// Initialize template variables from PHP_VAR_ environment variables
-foreach ($_SERVER as $key => $value) {
-    if (strpos($key, 'PHP_VAR_') === 0) {
-        $varName = substr($key, strlen('PHP_VAR_'));
-        $varValue = json_decode($value, true);
-        $GLOBALS[$varName] = $varValue;
-    }
-}
-`
-
+	// Use the improved PHP globals script from php_globals.go instead
 	// Create the PHP globals file
 	globalsPath := "/_frango_php_globals.php"
-	if err := v.CreateVirtualFile(globalsPath, []byte(pathGlobalsContent)); err != nil {
+
+	// Get the content from the phpGlobalsScript constant in php_globals.go
+	if err := v.CreateVirtualFile(globalsPath, []byte(phpGlobalsScript)); err != nil {
 		return fmt.Errorf("failed to create PHP globals file: %w", err)
 	}
 
