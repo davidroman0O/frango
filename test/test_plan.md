@@ -70,4 +70,42 @@
 51. Request/response logging between Go and PHP
 52. PHP file change detection and browser refresh
 53. Asset change detection
-54. Development workflow optimizations 
+54. Development workflow optimizations
+
+### Form Handling Tests
+
+The following tests should be implemented to ensure form handling works correctly:
+
+1. **GET Parameters**
+   - Verify query parameters are available through `$_SERVER['PHP_QUERY_*']` variables
+   - Test simple GET forms with various parameter types (text, numbers)
+   - Test URL encoding/decoding of special characters
+   - Test array parameters (e.g., `?items[]=1&items[]=2`)
+
+2. **POST Form Data**
+   - Verify form fields are available through `$_SERVER['PHP_FORM_*']` variables 
+   - Test application/x-www-form-urlencoded submissions
+   - Test different field types (text, numbers, booleans)
+   - Test empty submissions
+
+3. **Multipart Form Data**
+   - Test file uploads
+   - Test mixed form fields and file uploads
+   - Verify file metadata (name, size, type)
+   - Test large file handling
+
+4. **JSON Request Bodies**
+   - Test JSON request body parsing via `$_SERVER['PHP_JSON']`
+   - Test nested JSON structures
+   - Verify individual JSON fields are accessible via `$_SERVER['PHP_JSON_*']`
+   - Test error handling for malformed JSON
+
+### Important Note on Form Processing
+
+Due to the implementation of FrankenPHP, form data is not available through the standard PHP superglobal arrays (`$_GET`, `$_POST`). Instead, form data is exposed through `$_SERVER` variables with different prefixes:
+
+- GET parameters: `$_SERVER['PHP_QUERY_paramname']`
+- POST form fields: `$_SERVER['PHP_FORM_fieldname']`
+- JSON data: `$_SERVER['PHP_JSON']` and `$_SERVER['PHP_JSON_propname']`
+
+All tests must check for form data in these environment variables rather than the standard PHP superglobals. 
