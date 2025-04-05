@@ -27,7 +27,7 @@ $GLOBALS['_GET'] = $_GET;
 $_POST = [];
 foreach ($_SERVER as $key => $value) {
     if (strpos($key, 'PHP_FORM_') === 0) {
-        $paramName = substr($key, 10); // Remove 'PHP_FORM_' prefix
+        $paramName = substr($key, 9); // Fix: Changed from 10 to 9 to correctly remove 'PHP_FORM_' prefix
         $_POST[$paramName] = $value;
     }
 }
@@ -43,7 +43,7 @@ $_FORM = [];
 // Directly initialize $_FORM from PHP_FORM_ variables
 foreach ($_SERVER as $key => $value) {
     if (strpos($key, 'PHP_FORM_') === 0) {
-        $paramName = substr($key, 10); // Remove 'PHP_FORM_' prefix
+        $paramName = substr($key, 9); // Fix: Also update here from 10 to 9
         $_FORM[$paramName] = $value;
     }
 }
