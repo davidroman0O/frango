@@ -25,6 +25,8 @@ type Middleware struct {
 	blockDirectPHPURLs bool        // Whether to block direct .php URLs
 	rootVFS            *VFS        // Root VFS containing shared files
 	vfsCreateLock      sync.Mutex  // Lock for creating new VFS instances
+	errorHandlerPath   string      // Path to custom PHP error handler script
+	displayErrors      bool        // Whether to display PHP errors in the output
 }
 
 // Option is a function that configures the middleware
@@ -50,6 +52,12 @@ func New(opts ...Option) (*Middleware, error) {
 	// Apply all options
 	for _, opt := range opts {
 		opt(m)
+	}
+
+	// Set default values that depend on other options
+	if m.displayErrors == false && m.developmentMode {
+		// In development mode, display errors by default
+		m.displayErrors = true
 	}
 
 	// Create a unique temp dir for this instance

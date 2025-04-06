@@ -38,3 +38,20 @@ func WithDirectPHPURLsBlocking(block bool) Option {
 		m.blockDirectPHPURLs = block
 	}
 }
+
+// WithErrorHandler sets a custom PHP error handler script path.
+// When PHP errors occur, this script will be executed to handle them.
+func WithErrorHandler(phpErrorHandlerPath string) Option {
+	return func(m *Middleware) {
+		m.errorHandlerPath = phpErrorHandlerPath
+	}
+}
+
+// WithErrorDisplay controls whether PHP errors are displayed in the output.
+// In development mode, errors are displayed by default.
+// In production mode, errors are hidden by default.
+func WithErrorDisplay(display bool) Option {
+	return func(m *Middleware) {
+		m.displayErrors = display
+	}
+}

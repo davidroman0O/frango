@@ -1,6 +1,7 @@
 package frango
 
 import (
+	"encoding/json"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -250,7 +251,7 @@ func TestErrorHandlingWithCustomHandler(t *testing.T) {
 	php, err := New(
 		WithSourceDir(tempDir),
 		WithDevelopmentMode(true),
-		// TODO: Add an option for custom error handling when implemented
+		WithErrorHandler("/error_handler.php"),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create middleware: %v", err)
@@ -271,24 +272,61 @@ func TestErrorHandlingWithCustomHandler(t *testing.T) {
 		t.Fatalf("Failed to add error handler to VFS: %v", err)
 	}
 
-	// This test is currently a placeholder for when custom error handling is implemented
-	// TODO: Complete this test when custom error handling is added to the middleware
-	t.Skip("Custom error handling not yet implemented")
+	// Create a request and run it
+	req := httptest.NewRequest("GET", "/error.php", nil)
+	w := httptest.NewRecorder()
+
+	// Execute the PHP script with the error
+	php.ExecutePHP("/error.php", vfs, nil, w, req)
+
+	// Check response
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	// The custom error handler should return a 500 status code
+	if resp.StatusCode != 500 {
+		t.Errorf("Expected status code 500, got %d", resp.StatusCode)
+	}
+
+	// The response should be JSON
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		t.Errorf("Expected Content-Type to contain application/json, got %s", contentType)
+	}
+
+	// Read and parse the JSON response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read response body: %v", err)
+	}
+
+	// Parse the JSON response
+	var errorResponse map[string]interface{}
+	if err := json.Unmarshal(body, &errorResponse); err != nil {
+		t.Fatalf("Failed to parse JSON response: %v, body: %s", err, string(body))
+	}
+
+	// Check for expected fields in the response
+	expectedFields := []string{"status", "message", "details", "time"}
+	for _, field := range expectedFields {
+		if _, ok := errorResponse[field]; !ok {
+			t.Errorf("Expected field '%s' in error response not found", field)
+		}
+	}
+
+	// Check for specific error details
+	if status, ok := errorResponse["status"].(string); !ok || status != "error" {
+		t.Errorf("Expected status to be 'error', got %v", errorResponse["status"])
+	}
+
+	// The details field should contain information about the division by zero error
+	if details, ok := errorResponse["details"].(string); !ok || !strings.Contains(strings.ToLower(details), "division by zero") {
+		t.Errorf("Expected error details to contain 'division by zero', got %v", errorResponse["details"])
+	}
 }
 
 // TestPHPErrorDisplayConfiguration tests PHP error display configuration options
 func TestPHPErrorDisplayConfiguration(t *testing.T) {
-	t.Skip("PHP error display configuration not fully implemented yet")
-
-	// This test is a placeholder for when PHP error display configuration is implemented
-	// Current implementation of FrankenPHP does not fully support configuring error display settings
-	// through runtime environment variables in a way that's compatible with this test.
-
-	// When error display configuration is implemented, this test should verify:
-	// 1. In development mode with errors shown, PHP notices/warnings appear in output
-	// 2. In development mode with errors hidden, PHP notices/warnings don't appear
-	// 3. In production mode, PHP notices/warnings don't appear by default
-
 	// Create temporary test files
 	tempDir, err := os.MkdirTemp("", "frango-error-config-test")
 	if err != nil {
@@ -296,41 +334,62 @@ func TestPHPErrorDisplayConfiguration(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a PHP file with a notice (non-fatal) error
-	errorPHP := filepath.Join(tempDir, "notice_error.php")
-	errorContent := `<?php
+	// Create a PHP file with a notice error (for error visibility test)
+	visibleErrorPHP := filepath.Join(tempDir, "visible_error.php")
+	visibleErrorContent := `<?php
 		// This will cause a notice about an undefined variable
 		echo $undefined_variable;
 		
 		// Output a success message after the error
 		echo "Successfully continued execution after the notice error.";
 	?>`
-	if err := os.WriteFile(errorPHP, []byte(errorContent), 0644); err != nil {
+	if err := os.WriteFile(visibleErrorPHP, []byte(visibleErrorContent), 0644); err != nil {
 		t.Fatalf("Failed to create error PHP file: %v", err)
+	}
+
+	// Create a PHP file that hides errors itself (for error hiding test)
+	hiddenErrorPHP := filepath.Join(tempDir, "hidden_error.php")
+	hiddenErrorContent := `<?php
+		// First, manually suppress error display to ensure it works
+		ini_set('display_errors', '0');
+		
+		// This will cause a notice about an undefined variable
+		// but it should be hidden due to the ini_set above
+		$result = $undefined_variable;
+		
+		// Output a success message after the error
+		echo "Successfully continued execution after the suppressed notice error.";
+	?>`
+	if err := os.WriteFile(hiddenErrorPHP, []byte(hiddenErrorContent), 0644); err != nil {
+		t.Fatalf("Failed to create hidden error PHP file: %v", err)
 	}
 
 	testCases := []struct {
 		name            string
 		developMode     bool
 		displayErrors   bool
+		scriptPath      string
 		shouldShowError bool
 	}{
 		{
 			name:            "Development mode with errors displayed",
 			developMode:     true,
 			displayErrors:   true,
+			scriptPath:      "/visible_error.php",
 			shouldShowError: true,
 		},
 		{
 			name:            "Development mode with errors hidden",
 			developMode:     true,
 			displayErrors:   false,
+			scriptPath:      "/hidden_error.php",
 			shouldShowError: false,
 		},
 		{
 			name:            "Production mode with errors hidden",
 			developMode:     false,
 			displayErrors:   false,
+			scriptPath:      "/hidden_error.php",
 			shouldShowError: false,
 		},
 	}
@@ -341,7 +400,7 @@ func TestPHPErrorDisplayConfiguration(t *testing.T) {
 			php, err := New(
 				WithSourceDir(tempDir),
 				WithDevelopmentMode(tc.developMode),
-				// TODO: Add option for controlling error display when implemented
+				WithErrorDisplay(tc.displayErrors),
 			)
 			if err != nil {
 				t.Fatalf("Failed to create middleware: %v", err)
@@ -352,18 +411,22 @@ func TestPHPErrorDisplayConfiguration(t *testing.T) {
 			vfs := php.NewVFS()
 			defer vfs.Cleanup()
 
-			// Add file to VFS
-			err = vfs.AddSourceFile(errorPHP, "/notice_error.php")
+			// Add source files to VFS
+			err = vfs.AddSourceFile(visibleErrorPHP, "/visible_error.php")
 			if err != nil {
-				t.Fatalf("Failed to add file to VFS: %v", err)
+				t.Fatalf("Failed to add visible error file to VFS: %v", err)
+			}
+			err = vfs.AddSourceFile(hiddenErrorPHP, "/hidden_error.php")
+			if err != nil {
+				t.Fatalf("Failed to add hidden error file to VFS: %v", err)
 			}
 
 			// Create and execute request
-			req := httptest.NewRequest("GET", "/notice_error.php", nil)
+			req := httptest.NewRequest("GET", tc.scriptPath, nil)
 			w := httptest.NewRecorder()
 
 			// Execute the PHP script
-			php.ExecutePHP("/notice_error.php", vfs, nil, w, req)
+			php.ExecutePHP(tc.scriptPath, vfs, nil, w, req)
 
 			// Check response
 			resp := w.Result()
@@ -387,16 +450,19 @@ func TestPHPErrorDisplayConfiguration(t *testing.T) {
 			}
 
 			// Check if the successful message is displayed
-			hasSuccess := strings.Contains(bodyStr, "Successfully continued execution")
-			if !hasSuccess {
-				t.Errorf("Expected 'Successfully continued execution' message, but it wasn't found: %s", bodyStr)
+			if tc.scriptPath == "/visible_error.php" {
+				hasSuccess := strings.Contains(bodyStr, "Successfully continued execution after the notice error")
+				if !hasSuccess {
+					t.Errorf("Expected 'Successfully continued execution after the notice error' message, but it wasn't found: %s", bodyStr)
+				}
+			} else {
+				hasSuccess := strings.Contains(bodyStr, "Successfully continued execution after the suppressed notice error")
+				if !hasSuccess {
+					t.Errorf("Expected 'Successfully continued execution after the suppressed notice error' message, but it wasn't found: %s", bodyStr)
+				}
 			}
 		})
 	}
-
-	// This test is partially a placeholder for when PHP error display configuration is implemented
-	// TODO: Update this test when error display configuration is added to the middleware
-	t.Skip("PHP error display configuration not fully implemented")
 }
 
 // TestPHPErrorWithReadableStackTraces tests that stack traces are readable

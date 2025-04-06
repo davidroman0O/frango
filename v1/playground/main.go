@@ -45,8 +45,7 @@ func main() {
 	mux.Handle("/forms/form-upload", php.For("/forms/form-upload.php"))
 
 	// Debug pages
-	mux.Handle("/debug.php", php.For("/debug.php"))
-	mux.Handle("/forms/form_debug.php", php.For("/forms/form_debug.php"))
+	mux.Handle("/forms/form_debug", php.For("/forms/form_debug.php"))
 
 	// Default routes
 	mux.Handle("/forms", php.For("/forms/index.php"))
@@ -58,6 +57,7 @@ func main() {
 	mux.Handle("/categories/", php.For("/categories/{category}/{subcategory}.php"))
 
 	// Root route
+	mux.Handle("/debug", php.For("/debug.php"))
 	mux.Handle("/", php.For("/index.php"))
 
 	// Start the server

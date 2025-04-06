@@ -200,8 +200,8 @@ if (!isset($_QUERY)) $_QUERY = isset($_GET) ? $_GET : [];
         <h2>Debug Tools</h2>
         <p>Use these tools to help diagnose form processing issues:</p>
         <div class="button-group">
-            <a href="/forms/form_debug.php" class="btn btn-primary" target="_blank">Form Debug Tool</a>
-            <a href="/debug.php" class="btn btn-secondary" target="_blank">PHP Environment Debug</a>
+            <a href="/forms/form_debug" class="btn btn-primary" target="_blank">Form Debug Tool</a>
+            <a href="/debug" class="btn btn-secondary" target="_blank">PHP Environment Debug</a>
         </div>
         <div style="background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin-top: 10px;">
             <strong>Form Data Status:</strong>

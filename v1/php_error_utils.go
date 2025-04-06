@@ -27,6 +27,7 @@ var PHPErrorIndicators = map[PHPErrorType][]string{
 		"syntax error",
 		"Call to undefined function",
 		"Uncaught DivisionByZeroError",
+		"Division by zero",
 		"Uncaught TypeError",
 		"Allowed memory size",
 		"Maximum execution time",
@@ -35,7 +36,6 @@ var PHPErrorIndicators = map[PHPErrorType][]string{
 		"Warning:",
 		"include failed",
 		"require failed",
-		"Division by zero",
 	},
 	PHPErrorNotice: {
 		"Notice:",

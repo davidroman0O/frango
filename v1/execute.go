@@ -402,11 +402,76 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 
 	// Create a temporary wrapper script that includes the globals and then the main script
 	// Using require_once instead of include to ensure globals are loaded even if the script has an error
-	wrapperContent := fmt.Sprintf(`<?php
+	var wrapperContent string
+
+	// If a custom error handler is set, use try/catch to handle errors
+	if m.errorHandlerPath != "" && vfs.FileExists(m.errorHandlerPath) {
+		// Get the error handler path
+		errorHandlerPath, err := vfs.ResolvePath(m.errorHandlerPath)
+		if err != nil {
+			m.logger.Printf("Warning: Could not resolve error handler path '%s': %v", m.errorHandlerPath, err)
+			// Fall back to standard wrapper
+			wrapperContent = fmt.Sprintf(`<?php
 // Auto-generated wrapper to ensure PHP superglobals are initialized
 require_once '%s'; // Load globals initialization
 include '%s'; // Load main script
-?>`, globalsFilePath, phpFilePath)
+?>`, globalsFilePath, filepath.Base(phpFilePath))
+		} else {
+			// Create wrapper with error handling
+			wrapperContent = fmt.Sprintf(`<?php
+// Auto-generated wrapper with error handling
+require_once '%s'; // Load globals initialization
+
+// Custom error handler
+try {
+    // Execute the main script
+    include '%s';
+} catch (Throwable $e) {
+    // Record error information in environment
+    $_SERVER['PHP_LAST_ERROR'] = $e->getMessage();
+    $_SERVER['PHP_ERROR_CODE'] = $e->getCode();
+    $_SERVER['PHP_ERROR_FILE'] = $e->getFile();
+    $_SERVER['PHP_ERROR_LINE'] = $e->getLine();
+    $_SERVER['PHP_ERROR_TRACE'] = $e->getTraceAsString();
+    
+    // Call the custom error handler
+    include '%s';
+    exit;
+}
+?>`, globalsFilePath, filepath.Base(phpFilePath), errorHandlerPath)
+		}
+	} else {
+		// Configure error display based on settings
+		errorConfig := ""
+		if m.displayErrors {
+			errorConfig = `
+// Show all errors
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+error_reporting(E_ALL);`
+		} else {
+			errorConfig = `
+// Hide non-fatal errors
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+error_reporting(E_ERROR | E_PARSE);`
+		}
+
+		// Standard wrapper with error display configuration and basic try/catch to preserve error types
+		wrapperContent = fmt.Sprintf(`<?php
+// Auto-generated wrapper to ensure PHP superglobals are initialized
+require_once '%s'; // Load globals initialization
+%s
+
+// Execute the main script with basic error handling to preserve error types
+try {
+    include '%s'; // Load main script
+} catch (Throwable $e) {
+    // Let the error bubble up naturally to keep the same error type
+    throw $e;
+}
+?>`, globalsFilePath, errorConfig, filepath.Base(phpFilePath))
+	}
 
 	// Write the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
@@ -457,6 +522,17 @@ include '%s'; // Load main script
 	// Set explicit PHP timeouts to prevent hanging
 	phpBaseEnv["PHP_MAX_EXECUTION_TIME"] = "10" // 10 second timeout
 	phpBaseEnv["PHP_DEFAULT_SOCKET_TIMEOUT"] = "10"
+
+	// Set PHP error display settings
+	if m.displayErrors {
+		phpBaseEnv["display_errors"] = "1"
+		phpBaseEnv["display_startup_errors"] = "1"
+		phpBaseEnv["error_reporting"] = "E_ALL"
+	} else {
+		phpBaseEnv["display_errors"] = "0"
+		phpBaseEnv["display_startup_errors"] = "0"
+		phpBaseEnv["error_reporting"] = "E_ERROR | E_PARSE"
+	}
 
 	m.logger.Printf("Total PHP environment variables: %d", len(phpBaseEnv))
 

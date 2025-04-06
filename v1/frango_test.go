@@ -1194,7 +1194,7 @@ func TestBasicRequest(t *testing.T) {
 
 // TestPHPEnvironmentVariables tests that the PHP_ environment variables are correctly set and accessible
 func TestPHPEnvironmentVariables(t *testing.T) {
-	t.Skip("Skipping test temporarily due to hanging issues")
+	// t.Skip("Skipping test temporarily due to hanging issues")
 
 	// Create a temporary PHP script that outputs environment variables
 	envVarScript := `<?php
@@ -1293,8 +1293,13 @@ foreach ($_SERVER as $key => $value) {
 	// Create recorder for the response
 	w := httptest.NewRecorder()
 
+	// Manually add the test file to the VFS
+	if err := middleware.rootVFS.AddSourceFile(testFilePath, "/env_test.php"); err != nil {
+		t.Fatalf("Failed to add test file to VFS: %v", err)
+	}
+
 	// Execute the PHP script directly
-	middleware.ExecutePHP("env_test.php", middleware.rootVFS, nil, w, req)
+	middleware.ExecutePHP("/env_test.php", middleware.rootVFS, nil, w, req)
 
 	// Get the response
 	resp := w.Result()
@@ -1323,7 +1328,7 @@ foreach ($_SERVER as $key => $value) {
 
 // TestJSONBodyHandling tests that JSON request bodies are correctly passed to PHP
 func TestJSONBodyHandling(t *testing.T) {
-	t.Skip("Skipping test temporarily due to hanging issues")
+	// t.Skip("Skipping test temporarily due to hanging issues")
 
 	// Create a PHP script that outputs the JSON body from $_JSON
 	jsonTestScript := `<?php
@@ -1342,12 +1347,15 @@ if (isset($_SERVER['PHP_JSON'])) {
 
 // Check for $_JSON superglobal
 echo "\n\$_JSON Superglobal:\n";
+echo "  Raw var_dump of \$_JSON:\n";
+var_dump($_JSON);
+
 if (isset($_JSON) && is_array($_JSON)) {
     if (empty($_JSON)) {
-        echo "  $_JSON is empty\n";
+        echo "  \$_JSON is empty\n";
     } else {
         foreach ($_JSON as $key => $value) {
-            echo "  $_JSON[$key] = ";
+            echo "  \$_JSON[$key] = ";
             if (is_array($value)) {
                 echo json_encode($value) . "\n";
             } else {
@@ -1356,7 +1364,7 @@ if (isset($_JSON) && is_array($_JSON)) {
         }
     }
 } else {
-    echo "  $_JSON is not defined or not an array\n";
+    echo "  \$_JSON is not defined or not an array\n";
 }
 ?>`
 
@@ -1388,7 +1396,13 @@ if (isset($_JSON) && is_array($_JSON)) {
 
 	// Create a test mux
 	mux := http.NewServeMux()
-	mux.Handle("/json", middleware.For("json_test.php"))
+
+	// Manually add the test file to the VFS
+	if err := middleware.rootVFS.AddSourceFile(testFilePath, "/json_test.php"); err != nil {
+		t.Fatalf("Failed to add test file to VFS: %v", err)
+	}
+
+	mux.Handle("/json", middleware.For("/json_test.php"))
 
 	// Create a JSON request body
 	jsonBody := `{
@@ -1422,7 +1436,7 @@ if (isset($_JSON) && is_array($_JSON)) {
 		"PHP_JSON found",
 		"$_JSON[user]",
 		"$_JSON[items]",
-		"$_JSON[active] = true",
+		"$_JSON[active] = 1",
 	}
 
 	for _, expected := range expectedStrings {
