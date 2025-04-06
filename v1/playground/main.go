@@ -38,6 +38,7 @@ func main() {
 	mux.Handle("/forms/post_display", php.For("/forms/post_display.php"))
 	mux.Handle("/forms/get_display", php.For("/forms/get_display.php"))
 	mux.Handle("/forms/upload_display", php.For("/forms/upload_display.php"))
+	mux.Handle("/forms/json", php.For("/forms/json.php"))
 
 	// For form submissions using the hyphenated convention
 	mux.Handle("/forms/form-post", php.For("/forms/form-post.php"))

@@ -403,16 +403,23 @@ $fileTmpPath = $_FILES['userfile']['tmp_name'];</div>
             fetch('/forms/json', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
                 },
                 body: JSON.stringify(jsonData)
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
                 document.getElementById('jsonResponse').textContent = JSON.stringify(data, null, 2);
                 document.getElementById('jsonResult').style.display = 'block';
             })
             .catch(error => {
+                console.error('Error:', error);
                 document.getElementById('jsonResponse').textContent = 'Error: ' + error.message;
                 document.getElementById('jsonResult').style.display = 'block';
             });

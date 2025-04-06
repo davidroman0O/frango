@@ -5,12 +5,9 @@
  * Processes and responds to JSON data submissions
  */
 
-// Set content type to JSON if this is a direct request
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && 
-    (strpos($_SERVER['CONTENT_TYPE'] ?? '', 'application/json') !== false ||
-     strpos($_SERVER['HTTP_CONTENT_TYPE'] ?? '', 'application/json') !== false)) {
-    
-    // Return JSON response
+// Always set content type to JSON for POST requests
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Ensure we're setting the content type to application/json
     header('Content-Type: application/json');
     
     // Get JSON data from $_JSON superglobal if available, or from raw input
@@ -55,7 +52,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' &&
     exit;
 }
 
-// For non-JSON requests or GET requests, show the info page
+// For GET requests or other methods, show the info page
+// Only show this if directly navigating to the page (not an AJAX request)
+if (!isset($_SERVER['HTTP_X_REQUESTED_WITH']) || $_SERVER['HTTP_X_REQUESTED_WITH'] !== 'XMLHttpRequest') {
 ?>
 <!DOCTYPE html>
 <html>
@@ -143,3 +142,16 @@ $data = $_JSON['data'];</div>
     </div>
 </body>
 </html> 
+<?php 
+} else {
+    // If it is an AJAX request but somehow got here with a non-POST method,
+    // still return JSON to avoid breaking the client
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => false,
+        'message' => 'JSON endpoint requires POST method',
+        'method' => $_SERVER['REQUEST_METHOD']
+    ]);
+    exit;
+}
+?> 
