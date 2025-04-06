@@ -120,21 +120,38 @@ foreach ($_SERVER as $key => $value) {
         $parts = explode('_', $key, 3);
         if (count($parts) >= 3) {
             $fieldName = $parts[2];
-            // Structure will be filled later
-            if (!isset($fileFields[$fieldName])) {
-                $fileFields[$fieldName] = [
-                    'name' => '',
-                    'type' => '',
-                    'tmp_name' => '',
-                    'error' => UPLOAD_ERR_NO_FILE,
-                    'size' => 0
-                ];
+            // Extract the field name and property (name, type, etc.)
+            $lastUnderscorePos = strrpos($fieldName, '_');
+            if ($lastUnderscorePos !== false) {
+                $actualFieldName = substr($fieldName, 0, $lastUnderscorePos);
+                $propertyName = substr($fieldName, $lastUnderscorePos + 1);
+                
+                // Initialize the field if it doesn't exist
+                if (!isset($fileFields[$actualFieldName])) {
+                    $fileFields[$actualFieldName] = [
+                        'name' => '',
+                        'type' => '',
+                        'tmp_name' => '',
+                        'error' => UPLOAD_ERR_NO_FILE,
+                        'size' => 0
+                    ];
+                }
+                
+                // Set the property
+                if (in_array($propertyName, ['name', 'type', 'tmp_name', 'error', 'size'])) {
+                    // Convert numeric values to integers
+                    if ($propertyName === 'error' || $propertyName === 'size') {
+                        $fileFields[$actualFieldName][$propertyName] = intval($value);
+                    } else {
+                        $fileFields[$actualFieldName][$propertyName] = $value;
+                    }
+                }
             }
         }
     }
 }
 
-// If we found any file fields, try to populate $_FILES
+// If we found any file fields, populate $_FILES
 if (!empty($fileFields)) {
     $_FILES = $fileFields;
     $GLOBALS['_FILES'] = $_FILES;

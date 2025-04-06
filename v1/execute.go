@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 
+	"mime/multipart"
+
 	"github.com/dunglas/frankenphp"
 )
 
@@ -26,6 +28,7 @@ type RequestData struct {
 	PathSegments []string
 	JSONBody     map[string]interface{}
 	FormData     map[string][]string
+	FileUploads  map[string][]*multipart.FileHeader
 }
 
 // The path globals PHP script to be injected into VFS instances
@@ -294,6 +297,28 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 		if len(values) > 0 {
 			headerKey := strings.ReplaceAll(strings.ToUpper(key), "-", "_")
 			envData["PHP_HEADER_"+headerKey] = values[0]
+		}
+	}
+
+	// --- FILE UPLOADS ---
+	// Process file uploads for the $_FILES superglobal
+	if len(requestData.FileUploads) > 0 {
+		for fieldName, fileHeaders := range requestData.FileUploads {
+			if len(fileHeaders) > 0 {
+				fileHeader := fileHeaders[0] // Handle the first file for now (PHP style)
+
+				// Basic file information for PHP's $_FILES array
+				envData["PHP_FILE_"+fieldName+"_name"] = fileHeader.Filename
+				envData["PHP_FILE_"+fieldName+"_type"] = fileHeader.Header.Get("Content-Type")
+				envData["PHP_FILE_"+fieldName+"_size"] = strconv.FormatInt(fileHeader.Size, 10)
+
+				// Temporary file path - PHP normally stores uploaded files in temp directory
+				// Here we're just passing the name, the actual file will be handled by FrankenPHP
+				envData["PHP_FILE_"+fieldName+"_tmp_name"] = "/tmp/" + fileHeader.Filename
+
+				// No error
+				envData["PHP_FILE_"+fieldName+"_error"] = "0"
+			}
 		}
 	}
 
@@ -597,8 +622,9 @@ func extractRequestData(r *http.Request) *RequestData {
 			}
 			return segments
 		}(),
-		JSONBody: make(map[string]interface{}),
-		FormData: make(map[string][]string),
+		JSONBody:    make(map[string]interface{}),
+		FormData:    make(map[string][]string),
+		FileUploads: make(map[string][]*multipart.FileHeader),
 	}
 
 	// Parse form data if the method might include it
@@ -619,8 +645,24 @@ func extractRequestData(r *http.Request) *RequestData {
 					}
 				}
 			}
+		} else if strings.Contains(contentType, "multipart/form-data") {
+			// For multipart form data with file uploads
+			if err := r.ParseMultipartForm(32 << 20); err == nil { // 32MB max memory
+				// Get form values
+				if r.MultipartForm != nil {
+					// Extract form values
+					for key, values := range r.MultipartForm.Value {
+						data.FormData[key] = values
+					}
+
+					// Extract file uploads
+					for key, fileHeaders := range r.MultipartForm.File {
+						data.FileUploads[key] = fileHeaders
+					}
+				}
+			}
 		} else {
-			// For form data, parse the form
+			// For regular form data
 			if err := r.ParseForm(); err == nil {
 				data.FormData = r.Form
 			}
