@@ -95,7 +95,7 @@
             </ul>
         </div>
         
-        <form action="/forms/form-upload" method="POST" enctype="multipart/form-data">
+        <form action="/forms/upload_test" method="POST" enctype="multipart/form-data">
             <label for="userfile">Select File:</label>
             <input type="file" id="userfile" name="userfile">
             
@@ -169,7 +169,7 @@
     
     <div class="card">
         <h3>Navigation:</h3>
-        <p><a href="/forms/form-index">Back to Form Tests</a></p>
+        <p><a href="/forms/test_index">Back to Form Tests</a></p>
         <p><a href="/forms">Back to Forms</a></p>
     </div>
 </body>

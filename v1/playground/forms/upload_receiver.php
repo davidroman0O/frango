@@ -1,8 +1,8 @@
 <?php
 /**
- * PHP File Upload Receiver
+ * Upload Receiver
  * 
- * Receives and processes file uploads from the PHP form
+ * Receives and processes file uploads from PHP forms
  */
 
 // Initialize variables

@@ -72,19 +72,19 @@
         <h2>Single-Feature Form Tests</h2>
         <ul>
             <li>
-                <a href="/forms/form-get"><span class="method get">GET</span> GET Form Test</a>
+                <a href="/forms/get_test"><span class="method get">GET</span> GET Form Test</a>
                 <span class="description">- Test submitting data via URL parameters</span>
             </li>
             <li>
-                <a href="/forms/form-post"><span class="method post">POST</span> POST Form Test</a>
+                <a href="/forms/post_test"><span class="method post">POST</span> POST Form Test</a>
                 <span class="description">- Test submitting data via request body</span>
             </li>
             <li>
-                <a href="/forms/form-json"><span class="method json">JSON</span> JSON Request Test</a>
+                <a href="/forms/json_test"><span class="method json">JSON</span> JSON Request Test</a>
                 <span class="description">- Test sending and receiving JSON data</span>
             </li>
             <li>
-                <a href="/forms/form-upload"><span class="method upload">UPLOAD</span> File Upload Test</a>
+                <a href="/forms/upload_test"><span class="method upload">UPLOAD</span> File Upload Test</a>
                 <span class="description">- Test file upload handling</span>
             </li>
             <li>
@@ -96,11 +96,11 @@
         <h2>Quick Test Links</h2>
         <ul>
             <li>
-                <a href="/forms/form-test?test=query&value=123">Test Query Parameters</a>
+                <a href="/forms/get_test?test=query&value=123">Test Query Parameters</a>
                 <span class="description">- Test $_GET handling directly</span>
             </li>
             <li>
-                <a href="/forms/form-get?name=Example+User&category=test&limit=50">Pre-filled GET Form</a>
+                <a href="/forms/get_test?name=Example+User&category=test&limit=50">Pre-filled GET Form</a>
                 <span class="description">- GET form with predefined parameters</span>
             </li>
         </ul>

@@ -65,7 +65,7 @@
         <h1>GET Form Test</h1>
         <p>This form submits data using the GET method. The data will be visible in the URL as query parameters.</p>
         
-        <form action="/forms/form-get" method="GET">
+        <form action="/forms/get_test" method="GET">
             <label for="name">Name:</label>
             <input type="text" id="name" name="name" value="<?= htmlspecialchars($_GET['name'] ?? 'Test User') ?>">
             
@@ -107,7 +107,7 @@
     
     <div class="card">
         <h3>Navigation:</h3>
-        <p><a href="/forms/form-index">Back to Form Tests</a></p>
+        <p><a href="/forms/test_index">Back to Form Tests</a></p>
         <p><a href="/forms">Back to Forms</a></p>
     </div>
 </body>

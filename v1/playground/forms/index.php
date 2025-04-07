@@ -230,7 +230,7 @@ if (!isset($_QUERY)) $_QUERY = isset($_GET) ? $_GET : [];
         <h2>Debug Tools</h2>
         <p>Use these tools to help diagnose form processing issues:</p>
         <div class="button-group">
-            <a href="/forms/form_debug" class="btn btn-primary" target="_blank">Form Debug Tool</a>
+            <a href="/forms/debug" class="btn btn-primary" target="_blank">Form Debug Tool</a>
             <a href="/debug" class="btn btn-secondary" target="_blank">PHP Environment Debug</a>
         </div>
         <div style="background-color: #f8f9fa; padding: 10px; border-radius: 4px; margin-top: 10px;">
@@ -623,10 +623,10 @@ func jsonHandler(w http.ResponseWriter, r *http.Request) {
         <div class="form-example">
             <p>This example demonstrates uploading a file from one PHP script to another PHP script.</p>
             
-            <form action="/forms/php_receiver" method="POST" enctype="multipart/form-data">
+            <form id="uploadForm" action="/forms/php_receiver" method="POST" enctype="multipart/form-data">
                 <div class="form-group">
-                    <label for="php_userfile">Select File:</label>
-                    <input type="file" id="php_userfile" name="userfile">
+                    <label for="userfile">Select File:</label>
+                    <input type="file" id="userfile" name="userfile">
                 </div>
                 
                 <div class="form-group">
@@ -857,6 +857,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             const formData = new FormData(this);
             const responseDiv = document.getElementById('postGoResult');
             
+            // Create URL encoded version as backup
+            const urlEncodedData = new URLSearchParams();
+            for (const [key, value] of formData.entries()) {
+                urlEncodedData.append(key, value);
+                console.log(`Form data: ${key}=${value}`); // Debug log
+            }
+            
             // Reset response area
             responseDiv.style.display = 'none';
             document.getElementById('postGoResponse').textContent = '';
@@ -867,9 +874,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             button.textContent = 'Sending...';
             button.disabled = true;
             
+            // Use URL encoded format instead of FormData
             fetch('/api/post', {
                 method: 'POST',
-                body: formData
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: urlEncodedData
             })
             .then(response => {
                 if (!response.ok) {
@@ -899,6 +910,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             const formData = new FormData(this);
             const responseDiv = document.getElementById('formGoResult');
             
+            // Create URL encoded version for submission
+            const urlEncodedData = new URLSearchParams();
+            for (const [key, value] of formData.entries()) {
+                urlEncodedData.append(key, value);
+                console.log(`Form data: ${key}=${value}`); // Debug log
+            }
+            
             // Reset response area
             responseDiv.style.display = 'none';
             document.getElementById('formGoResponse').textContent = '';
@@ -909,9 +927,13 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             button.textContent = 'Sending...';
             button.disabled = true;
             
+            // Use URL encoded format instead of FormData
             fetch('/api/form', {
                 method: 'POST',
-                body: formData
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: urlEncodedData
             })
             .then(response => {
                 if (!response.ok) {

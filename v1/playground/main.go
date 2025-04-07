@@ -45,19 +45,21 @@ func main() {
 	mux.Handle("/forms/get_display", php.For("/forms/get_display.php"))
 	mux.Handle("/forms/upload_display", php.For("/forms/upload_display.php"))
 	mux.Handle("/forms/json", php.For("/forms/json.php"))
-	mux.Handle("/forms/php_receiver", php.For("/forms/php_receiver.php"))
+	mux.Handle("/forms/php_receiver", php.For("/forms/upload_receiver.php"))
 
 	// New PHP uploader examples
-	mux.Handle("/forms/php_uploader.php", php.For("/forms/php_uploader.php"))
-	mux.Handle("/forms/go_uploader.php", php.For("/forms/go_uploader.php"))
+	mux.Handle("/forms/upload_to_php", php.For("/forms/upload_to_php.php"))
+	mux.Handle("/forms/upload_to_go", php.For("/forms/upload_to_go.php"))
 
 	// For form submissions using the hyphenated convention
-	mux.Handle("/forms/form-post", php.For("/forms/form-post.php"))
-	mux.Handle("/forms/form-get", php.For("/forms/form-get.php"))
-	mux.Handle("/forms/form-upload", php.For("/forms/form-upload.php"))
+	mux.Handle("/forms/post_test", php.For("/forms/post_test.php"))
+	mux.Handle("/forms/get_test", php.For("/forms/get_test.php"))
+	mux.Handle("/forms/upload_test", php.For("/forms/upload_test.php"))
+	mux.Handle("/forms/json_test", php.For("/forms/json_test.php"))
+	mux.Handle("/forms/test_index", php.For("/forms/test_index.php"))
 
 	// Debug pages
-	mux.Handle("/forms/form_debug", php.For("/forms/form_debug.php"))
+	mux.Handle("/forms/debug", php.For("/forms/debug.php"))
 
 	// Go file upload handler - this handles uploads directly in Go
 	mux.HandleFunc("/upload", uploadHandler)
@@ -67,6 +69,10 @@ func main() {
 	mux.Handle("/forms/", php.For("/forms/index.php"))
 	mux.Handle("/users/", php.For("/users/{id}.php"))
 	mux.Handle("/products/", php.For("/products/{id}.php"))
+	mux.Handle("/nested", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/", php.For("/nested/deep/path/index.php"))
 	mux.Handle("/nested/deep/path", php.For("/nested/deep/path/index.php"))
 	mux.Handle("/nested/deep/path/", php.For("/nested/deep/path/index.php"))
 	mux.Handle("/categories/", php.For("/categories/{category}/{subcategory}.php"))
@@ -95,9 +101,16 @@ func main() {
 	mux.HandleFunc("/api/post", func(w http.ResponseWriter, r *http.Request) {
 		// Handle POST request
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "Failed to parse form", http.StatusBadRequest)
+			http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Log received values for debugging
+		log.Printf("POST handler received: username=%q, email=%q, comment=%q",
+			r.FormValue("username"), r.FormValue("email"), r.FormValue("comment"))
+
+		// Log all form values received
+		log.Printf("All form values: %v", r.Form)
 
 		w.Header().Set("Content-Type", "application/json")
 		response := map[string]interface{}{
@@ -108,7 +121,8 @@ func main() {
 				"email":    r.FormValue("email"),
 				"comment":  r.FormValue("comment"),
 			},
-			"timestamp": time.Now().Format(time.RFC3339),
+			"all_form_data": r.Form,
+			"timestamp":     time.Now().Format(time.RFC3339),
 		}
 		json.NewEncoder(w).Encode(response)
 	})
@@ -126,7 +140,18 @@ func main() {
 			}
 		} else {
 			// For POST requests, parse form data
-			r.ParseForm()
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			// Log received values for debugging
+			log.Printf("FORM handler received: product=%q, quantity=%q, notes=%q",
+				r.FormValue("product"), r.FormValue("quantity"), r.FormValue("notes"))
+
+			// Log all form values received
+			log.Printf("All form values: %v", r.Form)
+
 			data = map[string]string{
 				"product":  r.FormValue("product"),
 				"quantity": r.FormValue("quantity"),
@@ -137,10 +162,11 @@ func main() {
 		// Return response
 		w.Header().Set("Content-Type", "application/json")
 		response := map[string]interface{}{
-			"received":  true,
-			"method":    r.Method,
-			"data":      data,
-			"timestamp": time.Now().Format(time.RFC3339),
+			"received":      true,
+			"method":        r.Method,
+			"data":          data,
+			"all_form_data": r.Form,
+			"timestamp":     time.Now().Format(time.RFC3339),
 		}
 		json.NewEncoder(w).Encode(response)
 	})

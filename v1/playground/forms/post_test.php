@@ -89,7 +89,7 @@ $debugInfo['form_count'] = isset($_FORM) ? count($_FORM) : 0;
         <h1><span class="method">POST</span> Form Test</h1>
         <p>This form submits data using the POST method. The data will be sent in the request body, not visible in the URL.</p>
         
-        <form action="/forms/form-post" method="POST">
+        <form action="/forms/post_test" method="POST">
             <label for="username">Username:</label>
             <input type="text" id="username" name="username" value="test_user">
             
@@ -132,10 +132,10 @@ $debugInfo['form_count'] = isset($_FORM) ? count($_FORM) : 0;
     
     <div class="card">
         <h3>Navigation:</h3>
-        <p><a href="/forms/form-index">Back to Form Tests</a></p>
+        <p><a href="/forms/test_index">Back to Form Tests</a></p>
         <p><a href="/forms">Back to Forms</a></p>
         <p><a href="/debug.php" target="_blank">View Debug Info</a></p>
-        <p><a href="/forms/form_debug.php" target="_blank">Form Debug Tool</a></p>
+        <p><a href="/forms/debug" target="_blank">Form Debug Tool</a></p>
     </div>
 
     <?php include_once(__DIR__ . '/../debug_panel.php'); ?>

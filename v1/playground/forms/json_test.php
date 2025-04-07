@@ -170,7 +170,7 @@ $data = $_JSON['data'];</div>
     
     <div class="card">
         <h3>Navigation:</h3>
-        <p><a href="/forms/form-index">Back to Form Tests</a></p>
+        <p><a href="/forms/test_index">Back to Form Tests</a></p>
         <p><a href="/forms">Back to Forms</a></p>
     </div>
     
