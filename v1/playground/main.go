@@ -43,7 +43,6 @@ func main() {
 	mux.Handle("/forms/form_display", php.For("/forms/form_display.php"))
 	mux.Handle("/forms/post_display", php.For("/forms/post_display.php"))
 	mux.Handle("/forms/get_display", php.For("/forms/get_display.php"))
-	mux.Handle("/forms/upload_display", php.For("/forms/upload_display.php"))
 	mux.Handle("/forms/json", php.For("/forms/json.php"))
 	mux.Handle("/forms/php_receiver", php.For("/forms/upload_receiver.php"))
 
