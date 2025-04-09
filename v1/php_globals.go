@@ -15,17 +15,56 @@ const phpGlobalsScript = `<?php
 $_PATH = json_decode($_SERVER['_PATH'] ?? '{}', true);
 $GLOBALS['_PATH'] = $_PATH;
 
-// Initialize $_GET from pre-computed JSON
-$_GET = json_decode($_SERVER['_GET'] ?? '{}', true);
+/**
+ * IMPORTANT: Why normalize arrays in PHP instead of in Go?
+ * 
+ * Go represents HTTP query and form parameters as map[string][]string (always arrays)
+ * This results in a different structure than native PHP, where:
+ * - Single values like ?id=123 are strings: $_GET['id'] = "123"
+ * - Multiple values like ?id[]=1&id[]=2 are arrays: $_GET['id'] = ["1", "2"]
+ * 
+ * By normalizing in PHP, we ensure compatibility with:
+ * 1. Existing PHP code that checks variable types or expects string values
+ * 2. PHP frameworks that assume standard $_GET/$_POST behavior
+ * 3. Template code that uses echo $_GET['id'] directly (which would output "Array" otherwise)
+ * 
+ * While this could be done in Go, it's more straightforward to implement in PHP
+ * with minimal performance impact.
+ */
+
+// Initialize $_GET from pre-computed JSON with array item normalization
+$_GET_RAW = json_decode($_SERVER['_GET'] ?? '{}', true);
+$_GET = [];
+foreach ($_GET_RAW as $key => $value) {
+    // Convert array with single item to string (PHP behavior)
+    if (is_array($value) && count($value) === 1) {
+        $_GET[$key] = $value[0];
+    } else {
+        $_GET[$key] = $value;
+    }
+}
 $GLOBALS['_GET'] = $_GET;
 
-// Initialize $_POST from pre-computed JSON
-$_POST = json_decode($_SERVER['_POST'] ?? '{}', true);
+// Initialize $_POST from pre-computed JSON with array item normalization
+$_POST_RAW = json_decode($_SERVER['_POST'] ?? '{}', true);
+$_POST = [];
+foreach ($_POST_RAW as $key => $value) {
+    // Convert array with single item to string (PHP behavior)
+    if (is_array($value) && count($value) === 1) {
+        $_POST[$key] = $value[0];
+    } else {
+        $_POST[$key] = $value;
+    }
+}
 $GLOBALS['_POST'] = $_POST;
 
-// Initialize $_FORM from pre-computed JSON
-$_FORM = json_decode($_SERVER['_FORM'] ?? '{}', true);
+// Initialize $_FORM (alias for $_POST) 
+$_FORM = $_POST;
 $GLOBALS['_FORM'] = $_FORM;
+
+// Initialize $_REQUEST (combination of GET, POST, COOKIE)
+$_REQUEST = array_merge($_GET, $_POST, $_COOKIE ?? []);
+$GLOBALS['_REQUEST'] = $_REQUEST;
 
 // Initialize $_JSON from pre-computed JSON
 $_JSON = json_decode($_SERVER['_JSON'] ?? '{}', true);
@@ -53,11 +92,10 @@ if (isset($_SERVER['_TEMPLATE'])) {
     }
 }
 
-// ----- INITIALIZE REQUEST/SERVER DATA -----
-
-// Initialize $_REQUEST (combination of $_GET, $_POST, $_COOKIE)
-$_REQUEST = array_merge($_COOKIE ?? [], $_GET, $_POST);
-$GLOBALS['_REQUEST'] = $_REQUEST;
+// Make route pattern available from both $_SERVER and $_TEMPLATE for compatibility
+if (isset($_SERVER['PHP_VAR_ROUTE_PATTERN'])) {
+    $_SERVER['ROUTE_PATTERN'] = $_SERVER['PHP_VAR_ROUTE_PATTERN'];
+}
 
 // ----- HELPER FUNCTIONS -----
 
@@ -104,15 +142,22 @@ if (!function_exists('path_segments')) {
 $_URL = $_SERVER['REQUEST_URI'] ?? '';
 $_CURRENT_URL = $_SERVER['REQUEST_URI'] ?? '';
 
-// Unwrap arrays in $_GET for backward compatibility
-$_QUERY = [];
-foreach ($_GET as $key => $value) {
-    if (is_array($value) && count($value) === 1) {
-        $_QUERY[$key] = $value[0]; 
-    } else {
-        $_QUERY[$key] = $value;
+// Make query parameters easily accessible (same as $_GET)
+$_QUERY = $_GET;
+
+// Initialize cookies from HTTP headers if not already set
+$_COOKIE = [];
+if (isset($_SERVER['HTTP_COOKIE'])) {
+    $pairs = explode(';', $_SERVER['HTTP_COOKIE']);
+    foreach ($pairs as $pair) {
+        $pair = trim($pair);
+        if (empty($pair)) continue;
+        
+        list($name, $value) = explode('=', $pair, 2) + array('', '');
+        $_COOKIE[trim($name)] = urldecode(trim($value));
     }
 }
+$GLOBALS['_COOKIE'] = $_COOKIE;
 
 $GLOBALS['_URL'] = $_URL;
 $GLOBALS['_CURRENT_URL'] = $_CURRENT_URL;

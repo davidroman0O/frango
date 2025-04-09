@@ -16,7 +16,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.Handle("/", php.For("index.php"))
-	mux.Handle("GET /nested/{id}", php.For("nested/data-{id}.php"))
+	mux.Handle("GET /nested/{id}", php.For("nested/data.php"))
 
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
