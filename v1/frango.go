@@ -1,9 +1,9 @@
 package frango
 
 import (
-	"context"
 	"embed"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -298,82 +298,172 @@ func (m *Middleware) FileExists(virtualPath string) (bool, error) {
 	return vfs.FileExists(virtualPath), nil
 }
 
-// For returns an http.Handler for a specific PHP script
-func (m *Middleware) For(scriptPath string) http.Handler {
+func (m *Middleware) getErrorReportingHandler(err error) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Use rootVFS or create one if needed
-		var vfs *VFS
-		if m.rootVFS != nil {
-			vfs = m.rootVFS
-		} else {
-			var err error
-			vfs, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
-			if err != nil {
-				http.Error(w, "Failed to initialize VFS", http.StatusInternalServerError)
-				return
-			}
-			defer vfs.Cleanup()
+		// Log the error
+		m.logger.Printf("Error handling request for %s: %v", r.URL.Path, err)
+
+		// Determine status code based on error type
+		statusCode := http.StatusInternalServerError
+		if os.IsNotExist(err) || strings.Contains(err.Error(), "not found") {
+			statusCode = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "permission") || strings.Contains(err.Error(), "access") {
+			statusCode = http.StatusForbidden
 		}
 
+		// Create different error responses based on development mode
+		if m.developmentMode {
+			// In development mode: provide rich error details with HTML formatting
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(statusCode)
+
+			// HTML error template
+			errHTML := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frango PHP Error</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; padding: 2rem; max-width: 900px; margin: 0 auto; }
+        .error-container { background: #fff0f0; border-left: 4px solid #ff3333; padding: 1rem 1.5rem; border-radius: 4px; }
+        .error-type { font-weight: bold; font-size: 1.2rem; color: #cc0000; margin-bottom: 0.5rem; }
+        .error-message { font-family: monospace; padding: 0.5rem; background: #f8f8f8; border-radius: 3px; overflow-x: auto; }
+        .error-info { margin-top: 1rem; }
+        .error-path { font-family: monospace; }
+        .stack { margin-top: 1rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+        .stack-trace { font-size: 0.9rem; font-family: monospace; white-space: pre-wrap; background: #f8f8f8; padding: 0.8rem; overflow-x: auto; }
+        .details { margin-top: 1rem; }
+        .details code { font-family: monospace; background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Frango PHP Error</h1>
+    <div class="error-container">
+        <div class="error-type">%s Error (%d)</div>
+        <div class="error-message">%s</div>
+        <div class="error-info">
+            <p>Request URL: <span class="error-path">%s</span></p>
+            <p>Script Path: <span class="error-path">%s</span></p>
+        </div>
+        <div class="details">
+            <p>This error occurred while trying to serve a PHP script through the Frango middleware. Check that:</p>
+            <ul>
+                <li>The PHP file exists at the specified path</li>
+                <li>The PHP file contains valid PHP code</li>
+                <li>Permissions are set correctly on the file and directories</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+`
+			// Get error type string based on status code
+			errorType := "Server"
+			if statusCode == http.StatusNotFound {
+				errorType = "Not Found"
+			} else if statusCode == http.StatusForbidden {
+				errorType = "Access Denied"
+			}
+
+			// Fill in the HTML template
+			scriptPath := r.URL.Path
+			if r.URL.Path == "" {
+				scriptPath = "[not specified]"
+			}
+
+			html := fmt.Sprintf(errHTML,
+				errorType, statusCode,
+				html.EscapeString(err.Error()),
+				html.EscapeString(r.URL.String()),
+				html.EscapeString(scriptPath))
+
+			fmt.Fprint(w, html)
+		} else {
+			// In production mode: provide minimal, secure error information
+			// Don't expose internal details
+			message := "Internal server error"
+			if statusCode == http.StatusNotFound {
+				message = "The requested resource was not found"
+			} else if statusCode == http.StatusForbidden {
+				message = "Access denied"
+			}
+
+			http.Error(w, message, statusCode)
+		}
+	})
+}
+
+// For returns an http.Handler for a specific PHP script
+func (m *Middleware) For(scriptPath string) http.Handler {
+	// Use rootVFS or create one if needed
+	var vfs *VFS
+	if m.rootVFS != nil {
+		vfs = m.rootVFS
+	} else {
+		var err error
+		vfs, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
+		if err != nil {
+			return m.getErrorReportingHandler(err)
+		}
+	}
+
+	// Check if script has parameters
+	hasParameters := strings.Contains(scriptPath, "{") && strings.Contains(scriptPath, "}")
+
+	// Resolve script path upfront
+	resolvedPath := scriptPath
+	fileExists := vfs.FileExists(scriptPath)
+	var resolveErr error
+
+	if !fileExists {
+		// Try to resolve it from sourceDir
+		absPath := m.resolveScriptPath(scriptPath)
+		if absPath != "" && vfs.FileExists(absPath) {
+			resolvedPath = absPath
+			fileExists = true
+		} else if m.sourceDir != "" {
+			// Try to add from source directory
+			sourcePath := filepath.Join(m.sourceDir, filepath.FromSlash(strings.TrimPrefix(scriptPath, "/")))
+			if _, err := os.Stat(sourcePath); err == nil {
+				if err := vfs.AddSourceFile(sourcePath, scriptPath); err == nil {
+					fileExists = true
+				} else {
+					resolveErr = fmt.Errorf("error adding source file '%s' to VFS: %w", sourcePath, err)
+				}
+			} else {
+				resolveErr = fmt.Errorf("file not found: %s", scriptPath)
+			}
+		} else {
+			resolveErr = fmt.Errorf("file not found and no source directory configured: %s", scriptPath)
+		}
+	}
+
+	// For all paths that don't exist, return proper error handler - no special handling for parameters
+	if !fileExists {
+		if resolveErr == nil {
+			resolveErr = fmt.Errorf("file not found: %s", scriptPath)
+		}
+		return m.getErrorReportingHandler(resolveErr)
+	}
+
+	// Return handler function for files that exist
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Block direct access to .php URLs if configured
 		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
 			// Check if this is explicitly registered for this path pattern
-			pattern := extractPatternFromContext(r.Context())
-			if pattern == "" || !strings.HasSuffix(pattern, ".php") {
+			if r.Pattern == "" || !strings.HasSuffix(r.Pattern, ".php") {
 				http.NotFound(w, r)
 				return
 			}
 		}
 
-		// Check if script path contains parameters (like /users/{userId}.php)
-		hasParameters := strings.Contains(scriptPath, "{") && strings.Contains(scriptPath, "}")
-
-		// For parameter paths like /users/{userId}.php, we need special handling
-		if hasParameters {
-			// Use the script path itself to auto-extract parameters from URL
-			// For example: if scriptPath = "/users/{userId}.php" and r.URL.Path = "/users/42"
-			// this will extract userId=42 from the URL path
-
-			// First, make sure the VFS has this file
-			if !vfs.FileExists(scriptPath) {
-				// Try to resolve it from sourceDir
-				absPath := m.resolveScriptPath(scriptPath)
-				if absPath != "" {
-					scriptPath = absPath
-				}
-
-				// For scripts with parameters, the exact file might not exist in VFS yet
-				// but could be available from the source directory
-				if m.sourceDir != "" {
-					sourcePath := filepath.Join(m.sourceDir, filepath.FromSlash(strings.TrimPrefix(scriptPath, "/")))
-					if _, err := os.Stat(sourcePath); err == nil {
-						// Add it from the source directory
-						if err := vfs.AddSourceFile(sourcePath, scriptPath); err != nil {
-							m.logger.Printf("Error adding source file '%s' to VFS: %v", sourcePath, err)
-						}
-					}
-				}
-			}
-
-			// Execute the script - the ExecutePHP function will handle parameter extraction
-			m.ExecutePHP(scriptPath, vfs, nil, w, r)
-			return
-		}
-
-		// For non-parameterized scripts, follow the normal path
-		if !vfs.FileExists(scriptPath) {
-			// Try to resolve as a path relative to sourceDir
-			absPath := m.resolveScriptPath(scriptPath)
-			if absPath != "" && vfs.FileExists(absPath) {
-				scriptPath = absPath
-			} else {
-				http.NotFound(w, r)
-				return
-			}
+		// For parameterized paths, set the pattern on the request
+		if hasParameters && r.Pattern == "" {
+			r.Pattern = scriptPath
 		}
 
 		// Execute the PHP script
-		m.ExecutePHP(scriptPath, vfs, nil, w, r)
+		m.ExecutePHP(resolvedPath, vfs, nil, w, r)
 	})
 }
 
@@ -417,8 +507,7 @@ func (m *Middleware) ForVFS(vfs *VFS, scriptPath string) http.Handler {
 		// Block direct access to .php URLs if configured
 		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
 			// Check if this is explicitly registered for this path pattern
-			pattern := extractPatternFromContext(r.Context())
-			if pattern == "" || !strings.HasSuffix(pattern, ".php") {
+			if r.Pattern == "" || !strings.HasSuffix(r.Pattern, ".php") {
 				http.NotFound(w, r)
 				return
 			}
@@ -476,46 +565,6 @@ func (m *Middleware) resolveScriptPath(scriptPath string) string {
 	// Otherwise, join with sourceDir
 	if m.sourceDir != "" {
 		return filepath.Join("/", scriptPath)
-	}
-
-	return ""
-}
-
-// extractPatternFromContext extracts the pattern from the request context
-// This is the key used by Go 1.22+ ServeMux to store the matched pattern
-func extractPatternFromContext(ctx context.Context) string {
-	// Get the pattern from the context
-	if ctx == nil {
-		return ""
-	}
-
-	// Try our custom context key first (ContextKey)
-	if val := ctx.Value(ContextKey("pattern")); val != nil {
-		if pattern, ok := val.(string); ok {
-			return pattern
-		}
-	}
-
-	// For backward compatibility, also try the old phpContextKey
-	if val := ctx.Value(phpContextKey("pattern")); val != nil {
-		if pattern, ok := val.(string); ok {
-			return pattern
-		}
-	}
-
-	// For future Go 1.22+ compatibility, also try the standard ServeMux pattern key
-	// This key may change in future Go versions, so we need to check multiple possibilities
-	for _, key := range []any{
-		&http.ServeMux{},
-		"pattern",
-		"http.pattern",
-		"net/http.pattern",
-	} {
-		if val := ctx.Value(key); val != nil {
-			if pattern, ok := val.(string); ok {
-				return pattern
-			}
-		}
 	}
 
 	return ""
