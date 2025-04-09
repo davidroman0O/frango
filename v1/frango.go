@@ -72,9 +72,12 @@ func New(opts ...Option) (*Middleware, error) {
 	m.initLock.Lock()
 	defer m.initLock.Unlock()
 
+	// TODO: leverage `WithWorkers(fileName string, num int, env map[string]string) Option`
+	// TODO: leverage `WithNumThreads(num int) Option`
+	// TODO: add options
 	if !m.initialized {
 		m.logger.Println("Initializing FrankenPHP...")
-		if err := frankenphp.Init(); err != nil {
+		if err := frankenphp.Init(frankenphp.WithNumThreads(3)); err != nil {
 			return nil, fmt.Errorf("error initializing FrankenPHP: %w", err)
 		}
 		m.initialized = true
