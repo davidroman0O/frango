@@ -1,6 +1,6 @@
 <?php
 // Auto-generated wrapper to ensure PHP superglobals are initialized
-require_once '/var/folders/h2/lww7d7p5049dx4qzhxgk33640000gn/T/frango-2bec872f/vfs-04514c11/_frango_php_globals.php'; // Load globals initialization
+require_once '/var/folders/h2/lww7d7p5049dx4qzhxgk33640000gn/T/frango-57d3052b/vfs-ed53e08f/_frango_php_globals.php'; // Load globals initialization
 
 // Show all errors
 ini_set('display_errors', '1');
