@@ -5,31 +5,40 @@
  */
 
 // Initialize superglobals if they don't exist
-if (!isset($_PATH)) $_PATH = [];
-if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
-if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
+// if (!isset($_PATH)) $_PATH = [];
+// if (!isset($_PATH_SEGMENTS)) $_PATH_SEGMENTS = [];
+// if (!isset($_PATH_SEGMENT_COUNT)) $_PATH_SEGMENT_COUNT = 0;
 
-// Define helper functions if they don't exist
-if (!function_exists('path_segments')) {
-    function path_segments() {
-        global $_PATH_SEGMENTS;
-        return $_PATH_SEGMENTS;
-    }
+// // Define helper functions if they don't exist
+// if (!function_exists('path_segments')) {
+//     function path_segments() {
+//         global $_PATH_SEGMENTS;
+//         return $_PATH_SEGMENTS;
+//     }
+// }
+
+
+// if (!function_exists('path_param')) {
+//     function path_param($name, $default = null) {
+//         global $_PATH;
+//         return isset($_PATH[$name]) ? $_PATH[$name] : $default;
+//     }
+// }
+
+// if (!function_exists('has_path_param')) {
+//     function has_path_param($name) {
+//         global $_PATH;
+//         return isset($_PATH[$name]);
+//     }
+// }
+
+// Use script_path helper function to properly resolve the debug panel path
+// This ensures it works regardless of the current directory or path parameters
+$debug_panel_path = __DIR__ . '/../../debug_panel.php';
+if (function_exists('script_path')) {
+    $debug_panel_path = script_path('../../debug_panel.php');
 }
 
-if (!function_exists('path_param')) {
-    function path_param($name, $default = null) {
-        global $_PATH;
-        return isset($_PATH[$name]) ? $_PATH[$name] : $default;
-    }
-}
-
-if (!function_exists('has_path_param')) {
-    function has_path_param($name) {
-        global $_PATH;
-        return isset($_PATH[$name]);
-    }
-}
 ?>
 <!DOCTYPE html>
 <html>
@@ -76,7 +85,7 @@ if (!function_exists('has_path_param')) {
 </head>
 <body>
     <div class="card">
-        <h1>Categories Browser</h1>
+        <h1>Categories Browser </h1>
         
         <div class="breadcrumb">
             <strong>You are browsing:</strong>
@@ -89,6 +98,7 @@ if (!function_exists('has_path_param')) {
         
         <h3>Multiple Path Parameters:</h3>
         <pre><?php var_export($_PATH); ?></pre>
+        
         
         <p>
             Notice how multiple path parameters have been extracted:
@@ -119,6 +129,13 @@ if (!function_exists('has_path_param')) {
         <p><a href="/forms/">Try Form Handling Examples</a></p>
     </div>
     
-    <?php include_once(__DIR__ . '/../../debug_panel.php'); ?>
+    <?php
+    // Include the debug panel using the resolved path 
+    if (file_exists($debug_panel_path)) {
+        include_once($debug_panel_path);
+    } else {
+        echo "<div style='color:red'>Debug panel not found at: $debug_panel_path</div>";
+    }
+    ?>
 </body>
 </html> 

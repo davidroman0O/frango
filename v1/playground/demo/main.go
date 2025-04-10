@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/davidroman0O/frango/v1"
+	frango "github.com/davidroman0O/frango/v1"
 )
 
 //go:embed index.php
@@ -24,20 +25,51 @@ import (
 var phpFiles embed.FS
 
 func main() {
-	// Initialize Frango middleware
+	// Parse command line flags
+	port := flag.Int("port", 8080, "HTTP port to listen on")
+	sourceDir := flag.String("source", ".", "Source directory for PHP files")
+	flag.Parse()
+
+	// Create the PHP middleware
 	php, err := frango.New(
+		frango.WithSourceDir(*sourceDir),
 		frango.WithDevelopmentMode(true),
 	)
-
 	if err != nil {
-		log.Fatalf("Failed to create frango instance: %v", err)
+		log.Fatalf("Error creating PHP middleware: %v", err)
 	}
+	defer php.Shutdown()
 
-	// Add embedded PHP files to the middleware
-	php.AddEmbeddedDirectory(phpFiles, ".", "/")
-
-	// Create a standard HTTP mux
+	// Create a new router for PHP files
 	mux := http.NewServeMux()
+
+	// Path parameter examples - explicitly set the pattern
+	mux.HandleFunc("/categories/{category}/{subcategory}", func(w http.ResponseWriter, r *http.Request) {
+		// Set the pattern on the request for parameter extraction
+		r.Pattern = "/categories/{category}/{subcategory}"
+
+		// Serve the PHP file
+		handler := php.For("categories/{category}/{subcategory}.php")
+		handler.ServeHTTP(w, r)
+	})
+
+	// Single category path parameter
+	mux.HandleFunc("/categories/{category}", func(w http.ResponseWriter, r *http.Request) {
+		r.Pattern = "/categories/{category}"
+		handler := php.For("categories/{category}/index.php")
+		handler.ServeHTTP(w, r)
+	})
+
+	// Add route for the debug panel
+	mux.Handle("/debug_panel.php", http.StripPrefix("/", php.For("debug_panel.php")))
+
+	// Regular static routes
+	mux.Handle("/", http.StripPrefix("/", php.For("index.php")))
+	mux.Handle("/categories", http.StripPrefix("/categories", php.For("categories/index.php")))
+
+	// Static file handler (for CSS/JS assets)
+	fileServer := http.FileServer(http.Dir(filepath.Join(*sourceDir, "assets")))
+	mux.Handle("/assets/", http.StripPrefix("/assets/", fileServer))
 
 	// Form specific routes - explicit mappings for each form endpoint
 	mux.Handle("/forms/form_display", php.For("/forms/form_display.php"))
@@ -78,7 +110,6 @@ func main() {
 
 	// Root route
 	mux.Handle("/debug", php.For("/debug.php"))
-	mux.Handle("/", php.For("/index.php"))
 
 	// API endpoints to demonstrate Go handlers for form data
 	mux.HandleFunc("/api/get", func(w http.ResponseWriter, r *http.Request) {
@@ -190,9 +221,13 @@ func main() {
 		json.NewEncoder(w).Encode(response)
 	})
 
-	// Start the server
-	log.Println("Server starting on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	// Start HTTP server
+	addr := fmt.Sprintf(":%d", *port)
+	log.Printf("Starting PHP playground server on http://localhost%s", addr)
+	log.Printf("Using PHP source directory: %s", *sourceDir)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
 }
 
 // uploadHandler processes file uploads directly in Go

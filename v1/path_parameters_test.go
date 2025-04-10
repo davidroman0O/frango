@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -1060,8 +1061,8 @@ func TestPathParametersWithSpecialChars(t *testing.T) {
 				}
 
 				if actualValue != expectedValue {
-					t.Errorf("Expected path parameter %s=%s but got %s=%v",
-						paramName, expectedValue, paramName, actualValue)
+					t.Errorf("Parameter %s: expected %s but got %v",
+						paramName, expectedValue, actualValue)
 				}
 			}
 
@@ -1983,6 +1984,1283 @@ func TestPathParametersForPatterns(t *testing.T) {
 					t.Errorf("Expected route_pattern %s, got %s", tc.pattern, routePattern)
 				}
 			})
+		}
+	})
+}
+
+// TestNestedPathRouting tests multiple routes pointing to the same PHP script
+// and verifies that other routes still work properly alongside nested routes
+func TestNestedPathRouting(t *testing.T) {
+	// Create temp directory for PHP files
+	tempDir := filepath.Join(os.TempDir(), "frango-nested-paths-test")
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create the nested path directory structure
+	nestedDir := filepath.Join(tempDir, "nested", "deep", "path")
+	err = os.MkdirAll(nestedDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create nested directory structure: %v", err)
+	}
+
+	// PHP script for nested paths
+	nestedPathPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"type" => "nested_path",
+			"script" => "index.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"path_info" => $_SERVER["PATH_INFO"] ?? "",
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_params" => $_PATH ?? [],
+			"segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// PHP script for regular route
+	regularPathPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"type" => "regular_path",
+			"script" => "regular.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"path_info" => $_SERVER["PATH_INFO"] ?? "",
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_params" => $_PATH ?? [],
+			"segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// PHP script for root path
+	rootPathPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"type" => "root_path",
+			"script" => "index.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"path_info" => $_SERVER["PATH_INFO"] ?? "",
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_params" => $_PATH ?? [],
+			"segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Write PHP files
+	err = os.WriteFile(filepath.Join(nestedDir, "index.php"), []byte(nestedPathPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create nested path PHP file: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(tempDir, "regular.php"), []byte(regularPathPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create regular path PHP file: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(tempDir, "index.php"), []byte(rootPathPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create root path PHP file: %v", err)
+	}
+
+	// Create Frango middleware
+	php, err := New(
+		WithSourceDir(tempDir),
+		WithDevelopmentMode(true),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create Frango middleware: %v", err)
+	}
+	defer php.Shutdown()
+
+	// Create router and register routes
+	mux := http.NewServeMux()
+
+	// Nested paths - all pointing to the same file
+	mux.Handle("/nested", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/path", php.For("/nested/deep/path/index.php"))
+	mux.Handle("/nested/deep/path/", php.For("/nested/deep/path/index.php"))
+
+	// Regular route for verification
+	mux.Handle("/regular", php.For("/regular.php"))
+
+	// Root route - this needs to be registered LAST to prevent it from catching all routes
+	// Go's ServeMux gives precedence to more specific routes, so registering in this order is important
+	mux.Handle("/", php.For("/index.php"))
+
+	// Create test server
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Helper function to extract JSON response from HTTP request
+	getJsonResponse := func(url string) (map[string]interface{}, error) {
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Check for PHP errors
+		if strings.Contains(string(body), "Fatal error") || strings.Contains(string(body), "Parse error") {
+			return nil, fmt.Errorf("PHP error detected: %s", string(body))
+		}
+
+		return result, nil
+	}
+
+	// Test 0: Verify root path works BEFORE accessing any nested paths
+	t.Run("Root Path First", func(t *testing.T) {
+		// Access root path first, before any nested paths
+		rootResponse, err := getJsonResponse(server.URL + "/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		// Verify it's the correct handler
+		rootType, ok := rootResponse["type"].(string)
+		if !ok {
+			t.Fatalf("Expected 'type' field to be a string, got %T", rootResponse["type"])
+		}
+
+		if rootType != "root_path" {
+			t.Errorf("Expected root path type 'root_path', got '%s'", rootType)
+		}
+
+		// Verify script path
+		scriptPath, ok := rootResponse["script"].(string)
+		if !ok {
+			t.Fatalf("Expected 'script' field to be a string, got %T", rootResponse["script"])
+		}
+
+		if scriptPath != "index.php" {
+			t.Errorf("Expected script path 'index.php', got '%s'", scriptPath)
+		}
+
+		// Verify URI
+		uri, ok := rootResponse["uri"].(string)
+		if !ok {
+			t.Fatalf("Expected 'uri' field to be a string, got %T", rootResponse["uri"])
+		}
+
+		if uri != "/" {
+			t.Errorf("Expected URI to be '/', got '%s'", uri)
+		}
+	})
+
+	// Define the different nested paths to test
+	nestedPaths := []string{
+		"/nested",
+		"/nested/",
+		"/nested/deep",
+		"/nested/deep/",
+		"/nested/deep/path",
+		"/nested/deep/path/",
+		"/nested/deep/path/extra",
+	}
+
+	// Test 1: Verify all nested paths work
+	t.Run("Nested Paths", func(t *testing.T) {
+		for _, path := range nestedPaths {
+			t.Run(path, func(t *testing.T) {
+				response, err := getJsonResponse(server.URL + path)
+				if err != nil {
+					t.Fatalf("Request failed for path %s: %v", path, err)
+				}
+
+				// Verify response type
+				responseType, ok := response["type"].(string)
+				if !ok {
+					t.Fatalf("Expected 'type' field to be a string, got %T", response["type"])
+				}
+
+				if responseType != "nested_path" {
+					t.Errorf("Expected response type 'nested_path', got '%s'", responseType)
+				}
+
+				// Verify script path
+				script, ok := response["script"].(string)
+				if !ok {
+					t.Fatalf("Expected 'script' field to be a string, got %T", response["script"])
+				}
+
+				if script != "index.php" {
+					t.Errorf("Expected script path 'index.php', got '%s'", script)
+				}
+			})
+		}
+	})
+
+	// Test 2: Verify that regular route works between nested path accesses
+	t.Run("Regular Route Between Nested", func(t *testing.T) {
+		// First access nested path
+		nestedResponse, err := getJsonResponse(server.URL + "/nested")
+		if err != nil {
+			t.Fatalf("Nested path request failed: %v", err)
+		}
+
+		if nestedType, _ := nestedResponse["type"].(string); nestedType != "nested_path" {
+			t.Errorf("Expected nested path type 'nested_path', got '%s'", nestedType)
+		}
+
+		// Then access regular path
+		regularResponse, err := getJsonResponse(server.URL + "/regular")
+		if err != nil {
+			t.Fatalf("Regular path request failed: %v", err)
+		}
+
+		if regularType, _ := regularResponse["type"].(string); regularType != "regular_path" {
+			t.Errorf("Expected regular path type 'regular_path', got '%s'", regularType)
+		}
+
+		// Then access nested path again
+		nestedResponse2, err := getJsonResponse(server.URL + "/nested/deep")
+		if err != nil {
+			t.Fatalf("Second nested path request failed: %v", err)
+		}
+
+		if nestedType2, _ := nestedResponse2["type"].(string); nestedType2 != "nested_path" {
+			t.Errorf("Expected second nested path type 'nested_path', got '%s'", nestedType2)
+		}
+	})
+
+	// Test 3: Verify that nested routes work with query parameters
+	t.Run("Nested With Query Params", func(t *testing.T) {
+		response, err := getJsonResponse(server.URL + "/nested?param=value")
+		if err != nil {
+			t.Fatalf("Nested with query params request failed: %v", err)
+		}
+
+		responseType, _ := response["type"].(string)
+		if responseType != "nested_path" {
+			t.Errorf("Expected nested path type 'nested_path', got '%s'", responseType)
+		}
+
+		// Verify request URI contains the query parameter
+		uri, ok := response["uri"].(string)
+		if !ok {
+			t.Fatalf("Expected 'uri' field to be a string, got %T", response["uri"])
+		}
+
+		if !strings.Contains(uri, "?param=value") {
+			t.Errorf("Expected URI to contain query parameter, got '%s'", uri)
+		}
+	})
+
+	// Test 4: Verify nested paths with unusual characters or patterns
+	t.Run("Nested With Extra Segments", func(t *testing.T) {
+		// Test with extra segments
+		extraResponse, err := getJsonResponse(server.URL + "/nested/deep/path/extra/segments")
+		if err != nil {
+			t.Fatalf("Nested with extra segments request failed: %v", err)
+		}
+
+		if extraType, _ := extraResponse["type"].(string); extraType != "nested_path" {
+			t.Errorf("Expected nested path with extra segments type 'nested_path', got '%s'", extraType)
+		}
+
+		// Verify the script name is correct
+		scriptName, ok := extraResponse["script_name"].(string)
+		if !ok {
+			t.Fatalf("Expected 'script_name' field to be a string, got %T", extraResponse["script_name"])
+		}
+
+		if scriptName != "/index.php" {
+			t.Errorf("Expected script name '/index.php', got '%s'", scriptName)
+		}
+	})
+
+	// Test 5: Verify root path still works AFTER accessing nested paths
+	t.Run("Root Path After Nested", func(t *testing.T) {
+		// First access a nested path
+		_, err := getJsonResponse(server.URL + "/nested/deep")
+		if err != nil {
+			t.Fatalf("Nested path request failed: %v", err)
+		}
+
+		// Then access root path
+		rootResponse, err := getJsonResponse(server.URL + "/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		// Verify it's the correct handler
+		rootType, ok := rootResponse["type"].(string)
+		if !ok {
+			t.Fatalf("Expected 'type' field to be a string, got %T", rootResponse["type"])
+		}
+
+		// Now we can properly verify the root path still works after accessing nested paths
+		if rootType != "root_path" {
+			t.Errorf("Expected root path type 'root_path', got '%s'", rootType)
+		}
+
+		// Verify URI
+		uri, ok := rootResponse["uri"].(string)
+		if !ok {
+			t.Fatalf("Expected 'uri' field to be a string, got %T", rootResponse["uri"])
+		}
+
+		if uri != "/" {
+			t.Errorf("Expected URI to be '/', got '%s'", uri)
+		}
+	})
+
+	// Test 6: Specifically test for handler state leakage across requests
+	t.Run("Handler State Isolation", func(t *testing.T) {
+		// Create a completely separate mux with just the root handler
+		// This isolates the test from any potential state leakage from
+		// other nested path handlers
+		isolatedMux := http.NewServeMux()
+		isolatedMux.Handle("/", php.For("/index.php"))
+
+		isolatedServer := httptest.NewServer(isolatedMux)
+		defer isolatedServer.Close()
+
+		// First make a request to a nested path on the main server
+		// to potentially "contaminate" the state
+		_, err := getJsonResponse(server.URL + "/nested/deep/path")
+		if err != nil {
+			t.Fatalf("Nested path request failed: %v", err)
+		}
+
+		// Now try to access the root path on the isolated server
+		// This should always work and return root_path type
+		isolatedRootResponse, err := getJsonResponse(isolatedServer.URL + "/")
+		if err != nil {
+			t.Fatalf("Isolated root path request failed: %v", err)
+		}
+
+		// Verify it's the correct handler with no contamination
+		isolatedRootType, ok := isolatedRootResponse["type"].(string)
+		if !ok {
+			t.Fatalf("Expected 'type' field to be a string, got %T", isolatedRootResponse["type"])
+		}
+
+		if isolatedRootType != "root_path" {
+			t.Errorf("CRITICAL ERROR: Handler state contamination detected. Expected root path type 'root_path', got '%s'", isolatedRootType)
+		}
+	})
+}
+
+// TestRootPathRouting tests the root path behavior specifically
+func TestRootPathRouting(t *testing.T) {
+	// Create temp directory for PHP files
+	tempDir := filepath.Join(os.TempDir(), "frango-root-path-test")
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// PHP script for root path
+	rootPathPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"type" => "root_path",
+			"script" => "index.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"path_info" => $_SERVER["PATH_INFO"] ?? "",
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_params" => $_PATH ?? [],
+			"segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Write the PHP file
+	err = os.WriteFile(filepath.Join(tempDir, "index.php"), []byte(rootPathPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create root path PHP file: %v", err)
+	}
+
+	// Create Frango middleware
+	php, err := New(
+		WithSourceDir(tempDir),
+		WithDevelopmentMode(true),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create Frango middleware: %v", err)
+	}
+	defer php.Shutdown()
+
+	// Create router with ONLY the root route
+	mux := http.NewServeMux()
+	mux.Handle("/", php.For("/index.php"))
+
+	// Create test server
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Helper function to extract JSON response from HTTP request
+	getJsonResponse := func(url string) (map[string]interface{}, error) {
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Check for PHP errors
+		if strings.Contains(string(body), "Fatal error") || strings.Contains(string(body), "Parse error") {
+			return nil, fmt.Errorf("PHP error detected: %s", string(body))
+		}
+
+		return result, nil
+	}
+
+	// Test root path
+	t.Run("Root Path", func(t *testing.T) {
+		// Access root path
+		rootResponse, err := getJsonResponse(server.URL + "/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		// Verify it's the correct handler
+		rootType, ok := rootResponse["type"].(string)
+		if !ok {
+			t.Fatalf("Expected 'type' field to be a string, got %T", rootResponse["type"])
+		}
+
+		if rootType != "root_path" {
+			t.Errorf("Expected root path type 'root_path', got '%s'", rootType)
+		}
+
+		// Verify script path
+		scriptPath, ok := rootResponse["script"].(string)
+		if !ok {
+			t.Fatalf("Expected 'script' field to be a string, got %T", rootResponse["script"])
+		}
+
+		if scriptPath != "index.php" {
+			t.Errorf("Expected script path 'index.php', got '%s'", scriptPath)
+		}
+
+		// Verify URI
+		uri, ok := rootResponse["uri"].(string)
+		if !ok {
+			t.Fatalf("Expected 'uri' field to be a string, got %T", rootResponse["uri"])
+		}
+
+		if uri != "/" {
+			t.Errorf("Expected URI to be '/', got '%s'", uri)
+		}
+	})
+}
+
+// TestHandlerIsolation tests that different route handlers are properly isolated
+// and don't contaminate each other's state or execution context
+func TestHandlerIsolation(t *testing.T) {
+	// Create temp directory for PHP files
+	tempDir := filepath.Join(os.TempDir(), "frango-handler-isolation-test")
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create subdirectories
+	usersDir := filepath.Join(tempDir, "users")
+	productsDir := filepath.Join(tempDir, "products")
+
+	err = os.MkdirAll(usersDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create users directory: %v", err)
+	}
+
+	err = os.MkdirAll(productsDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create products directory: %v", err)
+	}
+
+	// Create different PHP files with unique identifiers
+
+	// Root handler PHP
+	rootPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"handler_id" => "root_handler",
+			"script_path" => "index.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Users handler PHP
+	usersPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"handler_id" => "users_handler",
+			"script_path" => "users/profile.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_segments" => $_PATH_SEGMENTS ?? [],
+			"user_id" => $_PATH["id"] ?? null,
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Products handler PHP
+	productsPHP := `<?php
+		header("Content-Type: application/json");
+		$response = [
+			"handler_id" => "products_handler",
+			"script_path" => "products/details.php",
+			"uri" => $_SERVER["REQUEST_URI"],
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_segments" => $_PATH_SEGMENTS ?? [],
+			"product_id" => $_PATH["id"] ?? null,
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Write PHP files
+	err = os.WriteFile(filepath.Join(tempDir, "index.php"), []byte(rootPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create root PHP file: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(usersDir, "profile.php"), []byte(usersPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create users PHP file: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(productsDir, "details.php"), []byte(productsPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create products PHP file: %v", err)
+	}
+
+	// Create Frango middleware
+	php, err := New(
+		WithSourceDir(tempDir),
+		WithDevelopmentMode(true),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create Frango middleware: %v", err)
+	}
+	defer php.Shutdown()
+
+	// Create router with multiple distinct routes
+	mux := http.NewServeMux()
+	mux.Handle("/users/", php.For("/users/profile.php"))       // Wildcard route
+	mux.Handle("/products/", php.For("/products/details.php")) // Wildcard route
+	mux.Handle("/", php.For("/index.php"))                     // Root route last
+
+	// Create test server
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// Helper function to extract JSON response
+	getJsonResponse := func(url string) (map[string]interface{}, error) {
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, fmt.Errorf("HTTP request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Check for PHP errors
+		if strings.Contains(string(body), "Fatal error") || strings.Contains(string(body), "Parse error") {
+			return nil, fmt.Errorf("PHP error detected: %s", string(body))
+		}
+
+		return result, nil
+	}
+
+	// Test 1: Access each route in isolation to establish baseline
+	t.Run("Individual Routes", func(t *testing.T) {
+		// Test root route
+		rootResponse, err := getJsonResponse(server.URL + "/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		// Verify correct handler
+		rootID, ok := rootResponse["handler_id"].(string)
+		if !ok || rootID != "root_handler" {
+			t.Errorf("Expected root_handler, got %v", rootID)
+		}
+
+		// Test users route
+		usersResponse, err := getJsonResponse(server.URL + "/users/123")
+		if err != nil {
+			t.Fatalf("Users path request failed: %v", err)
+		}
+
+		// Verify correct handler
+		usersID, ok := usersResponse["handler_id"].(string)
+		if !ok || usersID != "users_handler" {
+			t.Errorf("Expected users_handler, got %v", usersID)
+		}
+
+		// Test products route
+		productsResponse, err := getJsonResponse(server.URL + "/products/456")
+		if err != nil {
+			t.Fatalf("Products path request failed: %v", err)
+		}
+
+		// Verify correct handler
+		productsID, ok := productsResponse["handler_id"].(string)
+		if !ok || productsID != "products_handler" {
+			t.Errorf("Expected products_handler, got %v", productsID)
+		}
+	})
+
+	// Test 2: Rapidly alternate between routes to detect contamination
+	t.Run("Alternating Routes", func(t *testing.T) {
+		// Access sequence designed to maximize chance of contamination
+		accessSequence := []struct {
+			path          string
+			expectedID    string
+			failureDetail string
+		}{
+			{"/users/1", "users_handler", "first users request"},
+			{"/products/1", "products_handler", "products after users"},
+			{"/users/2", "users_handler", "users after products"},
+			{"/", "root_handler", "root after users"},
+			{"/products/2", "products_handler", "products after root"},
+			{"/users/3", "users_handler", "second users request"},
+			{"/products/3", "products_handler", "second products request"},
+			{"/", "root_handler", "second root request"},
+			{"/products/4", "products_handler", "third products request"},
+			{"/users/4", "users_handler", "third users request"},
+		}
+
+		for _, access := range accessSequence {
+			response, err := getJsonResponse(server.URL + access.path)
+			if err != nil {
+				t.Fatalf("Request to %s failed: %v", access.path, err)
+			}
+
+			handlerID, ok := response["handler_id"].(string)
+			if !ok {
+				t.Errorf("Missing handler_id in response for %s", access.path)
+				continue
+			}
+
+			if handlerID != access.expectedID {
+				t.Errorf("Handler contamination detected in %s: expected %s, got %s",
+					access.failureDetail, access.expectedID, handlerID)
+			}
+		}
+	})
+
+	// Test 3: Create separate ServeMux instances to verify isolation
+	t.Run("Isolated ServeMux Instances", func(t *testing.T) {
+		// Create separate mux for users
+		usersMux := http.NewServeMux()
+		usersMux.Handle("/users/", php.For("/users/profile.php"))
+		usersServer := httptest.NewServer(usersMux)
+		defer usersServer.Close()
+
+		// Create separate mux for products
+		productsMux := http.NewServeMux()
+		productsMux.Handle("/products/", php.For("/products/details.php"))
+		productsServer := httptest.NewServer(productsMux)
+		defer productsServer.Close()
+
+		// Create separate mux for root
+		rootMux := http.NewServeMux()
+		rootMux.Handle("/", php.For("/index.php"))
+		rootServer := httptest.NewServer(rootMux)
+		defer rootServer.Close()
+
+		// First access users route
+		for i := 0; i < 3; i++ {
+			_, err := getJsonResponse(server.URL + "/users/123")
+			if err != nil {
+				t.Fatalf("Users path request failed: %v", err)
+			}
+		}
+
+		// Then check isolated product server (should not be contaminated)
+		productsResponse, err := getJsonResponse(productsServer.URL + "/products/456")
+		if err != nil {
+			t.Fatalf("Isolated products path request failed: %v", err)
+		}
+
+		productsID, ok := productsResponse["handler_id"].(string)
+		if !ok || productsID != "products_handler" {
+			t.Errorf("Handler contamination in isolated server: expected products_handler, got %v", productsID)
+		}
+
+		// Check isolated root server (should not be contaminated)
+		rootResponse, err := getJsonResponse(rootServer.URL + "/")
+		if err != nil {
+			t.Fatalf("Isolated root path request failed: %v", err)
+		}
+
+		rootID, ok := rootResponse["handler_id"].(string)
+		if !ok || rootID != "root_handler" {
+			t.Errorf("Handler contamination in isolated server: expected root_handler, got %v", rootID)
+		}
+	})
+
+	// Test 4: Create a new middleware instance to ensure it's really the middleware causing issues, not the mux
+	t.Run("Separate Middleware Instances", func(t *testing.T) {
+		// Skip this test because FrankenPHP can only be initialized once per process
+		t.Skip("Skipping - FrankenPHP can only be initialized once per process")
+
+		// Create a new middleware instance
+		php2, err := New(
+			WithSourceDir(tempDir),
+			WithDevelopmentMode(true),
+		)
+		if err != nil {
+			t.Fatalf("Failed to create second middleware: %v", err)
+		}
+		defer php2.Shutdown()
+
+		// Create a new mux with the new middleware
+		mux2 := http.NewServeMux()
+		mux2.Handle("/users/", php2.For("/users/profile.php"))
+		mux2.Handle("/products/", php2.For("/products/details.php"))
+		mux2.Handle("/", php2.For("/index.php"))
+
+		server2 := httptest.NewServer(mux2)
+		defer server2.Close()
+
+		// First heavily use one route in the original server to potentially contaminate it
+		for i := 0; i < 5; i++ {
+			_, err := getJsonResponse(server.URL + "/users/" + fmt.Sprintf("%d", i))
+			if err != nil {
+				t.Fatalf("Users path request failed: %v", err)
+			}
+		}
+
+		// Now check the new server's root route
+		rootResponse, err := getJsonResponse(server2.URL + "/")
+		if err != nil {
+			t.Fatalf("New server root path request failed: %v", err)
+		}
+
+		rootID, ok := rootResponse["handler_id"].(string)
+		if !ok || rootID != "root_handler" {
+			t.Errorf("Handler contamination between middleware instances: expected root_handler, got %v", rootID)
+		}
+
+		// Check the product route on the new server
+		productsResponse, err := getJsonResponse(server2.URL + "/products/456")
+		if err != nil {
+			t.Fatalf("New server products path request failed: %v", err)
+		}
+
+		productsID, ok := productsResponse["handler_id"].(string)
+		if !ok || productsID != "products_handler" {
+			t.Errorf("Handler contamination between middleware instances: expected products_handler, got %v", productsID)
+		}
+	})
+
+	// Test 5: Simulate high load with concurrent requests
+	t.Run("Concurrent Requests", func(t *testing.T) {
+		var wg sync.WaitGroup
+		errorChan := make(chan string, 50)
+
+		// Run 50 concurrent requests across different routes
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+
+				var path, expectedID string
+				switch i % 3 {
+				case 0:
+					path = "/"
+					expectedID = "root_handler"
+				case 1:
+					path = fmt.Sprintf("/users/%d", i)
+					expectedID = "users_handler"
+				case 2:
+					path = fmt.Sprintf("/products/%d", i)
+					expectedID = "products_handler"
+				}
+
+				response, err := getJsonResponse(server.URL + path)
+				if err != nil {
+					errorChan <- fmt.Sprintf("Request to %s failed: %v", path, err)
+					return
+				}
+
+				handlerID, ok := response["handler_id"].(string)
+				if !ok {
+					errorChan <- fmt.Sprintf("Missing handler_id in response for %s", path)
+					return
+				}
+
+				if handlerID != expectedID {
+					errorChan <- fmt.Sprintf("Handler contamination in concurrent request to %s: expected %s, got %s",
+						path, expectedID, handlerID)
+					return
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		close(errorChan)
+
+		// Check for errors
+		for err := range errorChan {
+			t.Errorf("%s", err)
+		}
+	})
+}
+
+// TestRootPathAfterNestedAccess specifically tests the root path handler
+// after accessing nested paths to verify there's no state contamination
+func TestRootPathAfterNestedAccess(t *testing.T) {
+	// Create temp directory for PHP files
+	tempDir := filepath.Join(os.TempDir(), "frango-root-nested-test")
+	err := os.MkdirAll(tempDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create the nested directory structure
+	nestedDir := filepath.Join(tempDir, "nested", "deep", "path")
+	err = os.MkdirAll(nestedDir, 0755)
+	if err != nil {
+		t.Fatalf("Failed to create nested directory structure: %v", err)
+	}
+
+	// Write distinct PHP files with differentiating markers
+
+	// Root path PHP - with version tracking to detect handler reuse
+	rootPHP := `<?php
+		static $counter = 0; // This static counter should be reset between requests
+		$counter++;
+		
+		header("Content-Type: application/json");
+		$response = [
+			"handler_id" => "root_handler",
+			"counter" => $counter, // Should always be 1 if handler is properly reset
+			"script_path" => __FILE__,
+			"uri" => $_SERVER["REQUEST_URI"],
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"request_time" => time(),
+			"path_segments" => $_PATH_SEGMENTS ?? [],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Nested path PHP - intentionally very different from root to aid detection
+	nestedPHP := `<?php
+		static $counter = 0;
+		$counter++;
+		
+		header("Content-Type: application/json");
+		$response = [
+			"handler_id" => "nested_handler",
+			"counter" => $counter,
+			"script_path" => __FILE__,
+			"uri" => $_SERVER["REQUEST_URI"],
+			"script_name" => $_SERVER["SCRIPT_NAME"],
+			"path_segments" => $_PATH_SEGMENTS ?? [],
+			"REQUEST_URI" => $_SERVER["REQUEST_URI"],
+			"SCRIPT_FILENAME" => $_SERVER["SCRIPT_FILENAME"],
+			"PHP_SELF" => $_SERVER["PHP_SELF"],
+		];
+		echo json_encode($response, JSON_PRETTY_PRINT);
+	?>`
+
+	// Write the PHP files
+	err = os.WriteFile(filepath.Join(tempDir, "index.php"), []byte(rootPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create root PHP file: %v", err)
+	}
+
+	err = os.WriteFile(filepath.Join(nestedDir, "index.php"), []byte(nestedPHP), 0644)
+	if err != nil {
+		t.Fatalf("Failed to create nested PHP file: %v", err)
+	}
+
+	// Create Frango middleware
+	php, err := New(
+		WithSourceDir(tempDir),
+		WithDevelopmentMode(true),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create Frango middleware: %v", err)
+	}
+	defer php.Shutdown()
+
+	// Helper function to extract JSON response from HTTP request
+	getJsonResponse := func(handler http.Handler, path string) (map[string]interface{}, error) {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			return nil, fmt.Errorf("unexpected status code: %d", w.Code)
+		}
+
+		var result map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		}
+
+		// Check for PHP errors
+		if strings.Contains(w.Body.String(), "Fatal error") || strings.Contains(w.Body.String(), "Parse error") {
+			return nil, fmt.Errorf("PHP error detected: %s", w.Body.String())
+		}
+
+		return result, nil
+	}
+
+	// Run multiple test approaches to maximize chances of detecting issues
+
+	// Test 1: Direct handler verification without ServeMux
+	t.Run("Direct Handler Comparison", func(t *testing.T) {
+		// Create isolated handlers directly without a mux
+		rootHandler := php.For("/index.php")
+		nestedHandler := php.For("/nested/deep/path/index.php")
+
+		// Get root path response first
+		rootResponse, err := getJsonResponse(rootHandler, "/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		rootID, ok := rootResponse["handler_id"].(string)
+		if !ok || rootID != "root_handler" {
+			t.Errorf("Initial root response wrong handler: expected root_handler, got %v", rootID)
+		}
+
+		// Make multiple requests to nested handler to potentially contaminate state
+		for i := 0; i < 5; i++ {
+			_, err := getJsonResponse(nestedHandler, "/nested/deep/path")
+			if err != nil {
+				t.Fatalf("Nested path request failed: %v", err)
+			}
+		}
+
+		// Now request root path again - should still be root_handler
+		rootResponse2, err := getJsonResponse(rootHandler, "/")
+		if err != nil {
+			t.Fatalf("Second root path request failed: %v", err)
+		}
+
+		rootID2, ok := rootResponse2["handler_id"].(string)
+		if !ok || rootID2 != "root_handler" {
+			t.Errorf("Root handler contaminated: expected root_handler, got %v", rootID2)
+		}
+
+		// Check static counter - should be 1 if PHP environment is fresh
+		counter, ok := rootResponse2["counter"].(float64)
+		if !ok {
+			t.Errorf("Counter missing in response")
+		} else if counter != 1 {
+			t.Errorf("PHP environment not reset properly: counter = %v, expected 1", counter)
+		}
+	})
+
+	// Test 2: With ServeMux alternating paths
+	t.Run("Alternating ServeMux Paths", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.Handle("/nested/", php.For("/nested/deep/path/index.php"))
+		mux.Handle("/nested/deep/", php.For("/nested/deep/path/index.php"))
+		mux.Handle("/nested/deep/path", php.For("/nested/deep/path/index.php"))
+		mux.Handle("/nested/deep/path/", php.For("/nested/deep/path/index.php"))
+		mux.Handle("/", php.For("/index.php"))
+
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		// Helper for this test case
+		getResponse := func(path string) (map[string]interface{}, error) {
+			resp, err := http.Get(server.URL + path)
+			if err != nil {
+				return nil, fmt.Errorf("HTTP request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return nil, fmt.Errorf("failed to parse JSON: %w", err)
+			}
+
+			return result, nil
+		}
+
+		// Alternate between root and nested paths
+		for i := 0; i < 5; i++ {
+			// Access nested path
+			nestedResponse, err := getResponse("/nested/deep/path")
+			if err != nil {
+				t.Fatalf("Nested path request failed: %v", err)
+			}
+
+			// Verify it's the nested handler
+			nestedID, ok := nestedResponse["handler_id"].(string)
+			if !ok || nestedID != "nested_handler" {
+				t.Errorf("Expected nested_handler, got %v", nestedID)
+			}
+
+			// Access root path
+			rootResponse, err := getResponse("/")
+			if err != nil {
+				t.Fatalf("Root path request failed: %v", err)
+			}
+
+			// Verify it's the root handler
+			rootID, ok := rootResponse["handler_id"].(string)
+			if !ok || rootID != "root_handler" {
+				t.Errorf("Root handler contaminated in round %d: expected root_handler, got %v", i, rootID)
+			}
+
+			// Verify static counter
+			counter, ok := rootResponse["counter"].(float64)
+			if !ok {
+				t.Errorf("Counter missing in response")
+			} else if counter != 1 {
+				t.Errorf("PHP environment not reset in round %d: counter = %v, expected 1", i, counter)
+			}
+		}
+	})
+
+	// Test 3: Multiple different installations of same root route
+	t.Run("Multiple Root Instances", func(t *testing.T) {
+		// Skip this test because FrankenPHP can only be initialized once per process
+		// FrankenPHP has a design constraint where it can only be initialized once
+		// in a process, so we need to skip this test during normal runs
+		t.Skip("Skipping - FrankenPHP can only be initialized once per process")
+
+		// Create 3 separate mux instances with same pattern but different middleware instances
+		// This tests if the middleware is properly isolating state between instances
+
+		php1, err := New(WithSourceDir(tempDir), WithDevelopmentMode(true))
+		if err != nil {
+			t.Fatalf("Failed to create first middleware: %v", err)
+		}
+		defer php1.Shutdown()
+
+		php2, err := New(WithSourceDir(tempDir), WithDevelopmentMode(true))
+		if err != nil {
+			t.Fatalf("Failed to create second middleware: %v", err)
+		}
+		defer php2.Shutdown()
+
+		php3, err := New(WithSourceDir(tempDir), WithDevelopmentMode(true))
+		if err != nil {
+			t.Fatalf("Failed to create third middleware: %v", err)
+		}
+		defer php3.Shutdown()
+
+		// Create three mux instances
+		mux1 := http.NewServeMux()
+		mux1.Handle("/", php1.For("/index.php"))
+		server1 := httptest.NewServer(mux1)
+		defer server1.Close()
+
+		mux2 := http.NewServeMux()
+		mux2.Handle("/nested/", php2.For("/nested/deep/path/index.php"))
+		mux2.Handle("/", php2.For("/index.php"))
+		server2 := httptest.NewServer(mux2)
+		defer server2.Close()
+
+		mux3 := http.NewServeMux()
+		mux3.Handle("/", php3.For("/index.php"))
+		server3 := httptest.NewServer(mux3)
+		defer server3.Close()
+
+		// Access the root path on all three servers
+		getFromAllServers := func() error {
+			servers := []struct {
+				url  string
+				name string
+			}{
+				{server1.URL + "/", "server1"},
+				{server2.URL + "/", "server2"},
+				{server3.URL + "/", "server3"},
+			}
+
+			for _, s := range servers {
+				resp, err := http.Get(s.url)
+				if err != nil {
+					return fmt.Errorf("%s request failed: %w", s.name, err)
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					return fmt.Errorf("%s unexpected status code: %d", s.name, resp.StatusCode)
+				}
+
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return fmt.Errorf("%s failed to read body: %w", s.name, err)
+				}
+
+				var result map[string]interface{}
+				if err := json.Unmarshal(body, &result); err != nil {
+					return fmt.Errorf("%s failed to parse JSON: %w", s.name, err)
+				}
+
+				handlerID, ok := result["handler_id"].(string)
+				if !ok || handlerID != "root_handler" {
+					return fmt.Errorf("%s wrong handler: expected root_handler, got %v", s.name, handlerID)
+				}
+
+				counter, ok := result["counter"].(float64)
+				if !ok {
+					return fmt.Errorf("%s counter missing", s.name)
+				}
+
+				if counter != 1 {
+					return fmt.Errorf("%s PHP not reset: counter = %v, expected 1", s.name, counter)
+				}
+			}
+
+			return nil
+		}
+
+		// Access some nested routes on server2 to potentially contaminate state
+		for i := 0; i < 5; i++ {
+			resp, err := http.Get(server2.URL + "/nested/deep/path")
+			if err != nil {
+				t.Fatalf("Nested path request failed: %v", err)
+			}
+			resp.Body.Close()
+		}
+
+		// Now try to access all root paths - they should all be isolated
+		if err := getFromAllServers(); err != nil {
+			t.Errorf("Multiple instances test failed: %v", err)
+		}
+	})
+
+	// Test 4: Multiple identical middleware instances with same VFS but different routes
+	t.Run("Shared VFS Multiple Routes", func(t *testing.T) {
+		// Create a new VFS instance
+		vfs := php.NewVFS()
+		defer vfs.Cleanup()
+
+		// Configure the VFS
+		if err := vfs.AddSourceFile(filepath.Join(tempDir, "index.php"), "/index.php"); err != nil {
+			t.Fatalf("Failed to add root file to VFS: %v", err)
+		}
+
+		if err := vfs.AddSourceFile(filepath.Join(nestedDir, "index.php"), "/nested/deep/path/index.php"); err != nil {
+			t.Fatalf("Failed to add nested file to VFS: %v", err)
+		}
+
+		// Create server with multiple routes sharing the same VFS instance
+		mux := http.NewServeMux()
+
+		// Important: use ForVFS which is more likely to show problems
+		mux.Handle("/nested/deep/path/", php.ForVFS(vfs, "/nested/deep/path/index.php"))
+		mux.Handle("/", php.ForVFS(vfs, "/index.php"))
+
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		// Helper for this test case
+		getResponse := func(path string) (map[string]interface{}, error) {
+			resp, err := http.Get(server.URL + path)
+			if err != nil {
+				return nil, fmt.Errorf("HTTP request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err != nil {
+				return nil, fmt.Errorf("failed to parse JSON: %w", err)
+			}
+
+			return result, nil
+		}
+
+		// Access nested path several times
+		for i := 0; i < 5; i++ {
+			_, err := getResponse("/nested/deep/path/")
+			if err != nil {
+				t.Fatalf("Nested path request failed: %v", err)
+			}
+		}
+
+		// Now access root path - should be uncontaminated
+		rootResponse, err := getResponse("/")
+		if err != nil {
+			t.Fatalf("Root path request failed: %v", err)
+		}
+
+		rootID, ok := rootResponse["handler_id"].(string)
+		if !ok || rootID != "root_handler" {
+			t.Errorf("Expected root_handler, got %v", rootID)
+		}
+
+		counter, ok := rootResponse["counter"].(float64)
+		if !ok {
+			t.Errorf("Counter missing in response")
+		} else if counter != 1 {
+			t.Errorf("Shared VFS handler contamination: counter = %v, expected 1", counter)
 		}
 	})
 }

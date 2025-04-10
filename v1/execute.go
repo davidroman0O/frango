@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mime/multipart"
+	"hash/fnv"
 
 	"github.com/dunglas/frankenphp"
 )
@@ -81,7 +82,7 @@ func (m *Middleware) ExecutePHP(scriptPath string, vfs *VFS, renderFn RenderData
 	}
 
 	// 5. Check if wrapper already exists, and create it if needed
-	wrapperFilename := wrapperPrefix + filepath.Base(phpFilePath)
+	wrapperFilename := wrapperPrefix + calculateScriptPathHash(scriptPath) + "_" + filepath.Base(phpFilePath)
 	wrapperPath := filepath.Join(vfs.tempDir, wrapperFilename)
 
 	// Check if wrapper exists and is up to date
@@ -431,12 +432,52 @@ func createPhpWrapper(vfs *VFS, phpFilePath, wrapperPath, globalsFile string) er
 	// Path to the globals file - handle the leading slash by trimming it for filepath.Join
 	globalsFilePath := filepath.Join(vfs.tempDir, strings.TrimPrefix(globalsFile, "/"))
 
-	// Create a simple wrapper that includes the LOCAL copy of the original script
+	// Get the directory of the original script - critical for include path resolution
+	// Remove any path parameters from the path to ensure it's a valid directory
+	cleanOrigPath := sanitizePathForChdir(phpFilePath)
+	originalScriptDir := filepath.Dir(cleanOrigPath)
+
+	// Ensure the directory exists before using it
+	if _, err := os.Stat(originalScriptDir); os.IsNotExist(err) {
+		// If directory doesn't exist, use a fallback that we know exists
+		originalScriptDir = vfs.tempDir
+	}
+
+	// Create a wrapper that properly sets up include paths before including the target script
 	wrapperContent := fmt.Sprintf(`<?php
-// Auto-generated wrapper
-require_once '%s'; // Load globals
-include './%s'; // Include the local copy
-?>`, globalsFilePath, targetFilename)
+// Auto-generated wrapper for %s
+// This wrapper provides isolation between different script executions
+// Script hash: %s
+
+// Load common globals defined by frango
+require_once '%s';
+
+// Save the current working directory and include path
+$original_dir = getcwd();
+$original_include_path = get_include_path();
+
+// Set up the working directory to the original script's directory
+// This will make all relative includes in the target script work correctly
+chdir('%s');
+set_include_path(get_include_path() . PATH_SEPARATOR . '%s');
+
+// Define helper functions for resolving paths relative to the original script
+if (!function_exists('script_path')) {
+    function script_path($path) {
+        return '%s' . DIRECTORY_SEPARATOR . $path;
+    }
+}
+
+// Include the target PHP script
+try {
+    include './%s';
+} finally {
+    // Restore original working directory and include path
+    chdir($original_dir);
+    set_include_path($original_include_path);
+}
+?>`, phpFilePath, calculateScriptPathHash(phpFilePath), globalsFilePath,
+		originalScriptDir, originalScriptDir, originalScriptDir, targetFilename)
 
 	// Create the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
@@ -444,6 +485,14 @@ include './%s'; // Include the local copy
 	}
 
 	return nil
+}
+
+// sanitizePathForChdir removes path parameters from a path to make it valid for chdir()
+func sanitizePathForChdir(path string) string {
+	// Replace {parameter} patterns with placeholder to ensure the path is valid
+	paramPattern := regexp.MustCompile(`\{[^}]+\}`)
+	cleanPath := paramPattern.ReplaceAllString(path, "param")
+	return cleanPath
 }
 
 // buildPhpEnvironment builds the PHP environment variables for execution
@@ -1146,4 +1195,21 @@ func extractHostOnly(remoteAddr string) string {
 		return parts[0]
 	}
 	return remoteAddr
+}
+
+// calculateScriptPathHash generates a short hash for a script path.
+// This is critical to ensure that different PHP scripts get different wrapper files,
+// even if they have the same base filename but exist in different paths.
+//
+// Without this hash, different scripts with the same name (e.g. /index.php and /nested/deep/path/index.php)
+// would share the same wrapper file, causing state leakage and unexpected behavior between requests.
+func calculateScriptPathHash(scriptPath string) string {
+	h := fnv.New32a()
+	h.Write([]byte(scriptPath))
+	hashStr := fmt.Sprintf("%x", h.Sum32())
+	// Use a safe approach to get a substring
+	if len(hashStr) > 8 {
+		return hashStr[:8]
+	}
+	return hashStr
 }

@@ -396,8 +396,21 @@ func (m *Middleware) getErrorReportingHandler(err error) http.Handler {
 	})
 }
 
-// For returns an http.Handler for a specific PHP script
-func (m *Middleware) For(scriptPath string) http.Handler {
+// For creates a handler that will serve the given PHP script.
+//
+// All handlers created by For share the same main VFS instance, which ensures
+// consistency across different routes. File modifications made in one route
+// will be visible to all other routes.
+//
+// If you need isolated environments for different scripts, use ForVFS with
+// a branched VFS instance.
+func (m *Middleware) For(phpScriptPath string) http.Handler {
+	// Use the main VFS instance for all routes to maintain consistency
+	return m.ForVFS(m.rootVFS, phpScriptPath)
+}
+
+// Render returns an http.Handler that renders a PHP script with data from renderFn
+func (m *Middleware) Render(scriptPath string, renderFn RenderData) http.Handler {
 	// Use rootVFS or create one if needed
 	var vfs *VFS
 	if m.rootVFS != nil {
@@ -405,100 +418,26 @@ func (m *Middleware) For(scriptPath string) http.Handler {
 	} else {
 		var err error
 		vfs, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
+		defer vfs.Cleanup()
 		if err != nil {
+			// http.Error(w, "Failed to initialize VFS", http.StatusInternalServerError)
 			return m.getErrorReportingHandler(err)
 		}
 	}
 
-	// Check if script has parameters
-	hasParameters := strings.Contains(scriptPath, "{") && strings.Contains(scriptPath, "}")
-
-	// Resolve script path upfront
-	resolvedPath := scriptPath
-	fileExists := vfs.FileExists(scriptPath)
-	var resolveErr error
-
-	if !fileExists {
-		// Try to resolve it from sourceDir
+	// Check if file exists in VFS
+	if !vfs.FileExists(scriptPath) {
+		// Try to resolve as a path relative to sourceDir
 		absPath := m.resolveScriptPath(scriptPath)
 		if absPath != "" && vfs.FileExists(absPath) {
-			resolvedPath = absPath
-			fileExists = true
-		} else if m.sourceDir != "" {
-			// Try to add from source directory
-			sourcePath := filepath.Join(m.sourceDir, filepath.FromSlash(strings.TrimPrefix(scriptPath, "/")))
-			if _, err := os.Stat(sourcePath); err == nil {
-				if err := vfs.AddSourceFile(sourcePath, scriptPath); err == nil {
-					fileExists = true
-				} else {
-					resolveErr = fmt.Errorf("error adding source file '%s' to VFS: %w", sourcePath, err)
-				}
-			} else {
-				resolveErr = fmt.Errorf("file not found: %s", scriptPath)
-			}
+			scriptPath = absPath
 		} else {
-			resolveErr = fmt.Errorf("file not found and no source directory configured: %s", scriptPath)
+			// http.NotFound(w, r)
+			return m.getErrorReportingHandler(fmt.Errorf("file not found: %s", scriptPath))
 		}
 	}
 
-	// For all paths that don't exist, return proper error handler - no special handling for parameters
-	if !fileExists {
-		if resolveErr == nil {
-			resolveErr = fmt.Errorf("file not found: %s", scriptPath)
-		}
-		return m.getErrorReportingHandler(resolveErr)
-	}
-
-	// Return handler function for files that exist
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Block direct access to .php URLs if configured
-		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
-			// Check if this is explicitly registered for this path pattern
-			if r.Pattern == "" || !strings.HasSuffix(r.Pattern, ".php") {
-				http.NotFound(w, r)
-				return
-			}
-		}
-
-		// For parameterized paths, set the pattern on the request
-		if hasParameters && r.Pattern == "" {
-			r.Pattern = scriptPath
-		}
-
-		// Execute the PHP script
-		m.ExecutePHP(resolvedPath, vfs, nil, w, r)
-	})
-}
-
-// Render returns an http.Handler that renders a PHP script with data from renderFn
-func (m *Middleware) Render(scriptPath string, renderFn RenderData) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Use rootVFS or create one if needed
-		var vfs *VFS
-		if m.rootVFS != nil {
-			vfs = m.rootVFS
-		} else {
-			var err error
-			vfs, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
-			if err != nil {
-				http.Error(w, "Failed to initialize VFS", http.StatusInternalServerError)
-				return
-			}
-			defer vfs.Cleanup()
-		}
-
-		// Check if file exists in VFS
-		if !vfs.FileExists(scriptPath) {
-			// Try to resolve as a path relative to sourceDir
-			absPath := m.resolveScriptPath(scriptPath)
-			if absPath != "" && vfs.FileExists(absPath) {
-				scriptPath = absPath
-			} else {
-				http.NotFound(w, r)
-				return
-			}
-		}
-
 		// Execute the PHP script with render data
 		m.ExecutePHP(scriptPath, vfs, renderFn, w, r)
 	})
