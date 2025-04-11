@@ -51,6 +51,10 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 		refCount:        0, // Initialize reference count to 0
 		isCleanedUp:     false,
 		globalsProvider: config.GlobalsProvider,
+
+		// Initialize new cache maps
+		pathCache:    make(map[string]string),
+		contentCache: make(map[string][]byte),
 	}
 
 	// Initialize with PHP globals
@@ -95,6 +99,10 @@ func (v *VFS) Branch() *VFS {
 		developMode:     v.developMode,
 		globalLibs:      make(map[string]string),
 		globalsProvider: v.globalsProvider, // Inherit globals provider from parent
+
+		// Initialize new cache maps for branch
+		pathCache:    make(map[string]string),
+		contentCache: make(map[string][]byte),
 	}
 	v.mutex.RUnlock()
 

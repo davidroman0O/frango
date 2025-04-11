@@ -68,28 +68,38 @@ func (p *DefaultGlobalsProvider) GetPHPGlobalsPath() string {
 
 // VFS represents a virtual filesystem container for PHP files with branching capability
 type VFS struct {
-	name            string                // Unique identifier for this VFS
-	parent          *VFS                  // Parent VFS (if this is a branch)
-	sourceMappings  map[string]string     // Virtual path -> source path (for files on disk)
-	embedMappings   map[string]string     // Virtual path -> embed temp path (for embedded files)
-	virtualFiles    map[string][]byte     // Virtual path -> content (for in-memory files)
-	fileOrigins     map[string]FileOrigin // Virtual path -> origin type
-	fileHashes      map[string]FileHash   // Path -> hash info (for change detection)
-	tempDir         string                // Base temp directory for this VFS
-	mutex           sync.RWMutex          // For thread safety
-	watchTicker     *time.Ticker          // For file watching
-	watchStop       chan bool             // To signal watching to stop
-	logger          *log.Logger           // For logging operations
-	invalidated     bool                  // Whether any files need refreshing
-	changedFiles    map[string]bool       // Tracks which files have changed
-	inheritedPaths  map[string]bool       // Which paths come from parent VFS
-	developMode     bool                  // Whether development mode is enabled
-	globalLibs      map[string]string     // Path -> temp path for global libraries
-	phpGlobalsFile  string                // Path to the PHP globals script in this VFS
-	refCount        int                   // Number of child VFS instances referencing this one
-	refMutex        sync.Mutex            // Separate mutex for reference counting
-	isCleanedUp     bool                  // Whether this VFS has been cleaned up
-	globalsProvider GlobalsProvider       // Provider for PHP globals script
+	name           string                // Unique identifier for this VFS
+	parent         *VFS                  // Parent VFS (if this is a branch)
+	sourceMappings map[string]string     // Virtual path -> source path (for files on disk)
+	embedMappings  map[string]string     // Virtual path -> embed temp path (for embedded files)
+	virtualFiles   map[string][]byte     // Virtual path -> content (for in-memory files)
+	fileOrigins    map[string]FileOrigin // Virtual path -> origin type
+	fileHashes     map[string]FileHash   // Path -> hash info (for change detection)
+	tempDir        string                // Base temp directory for this VFS
+
+	// Granular mutex locks for different operations
+	mutex      sync.RWMutex // General mutex for structural changes
+	pathMutex  sync.RWMutex // For path resolution operations
+	fileMutex  sync.RWMutex // For file content operations
+	cacheMutex sync.RWMutex // For cache operations
+	refMutex   sync.Mutex   // For reference counting
+
+	watchTicker     *time.Ticker      // For file watching
+	watchStop       chan bool         // To signal watching to stop
+	logger          *log.Logger       // For logging operations
+	invalidated     bool              // Whether any files need refreshing
+	changedFiles    map[string]bool   // Tracks which files have changed
+	inheritedPaths  map[string]bool   // Which paths come from parent VFS
+	developMode     bool              // Whether development mode is enabled
+	globalLibs      map[string]string // Path -> temp path for global libraries
+	phpGlobalsFile  string            // Path to the PHP globals script in this VFS
+	refCount        int               // Number of child VFS instances referencing this one
+	isCleanedUp     bool              // Whether this VFS has been cleaned up
+	globalsProvider GlobalsProvider   // Provider for PHP globals script
+
+	// Caching maps for improved performance
+	pathCache    map[string]string // Virtual path -> resolved path cache
+	contentCache map[string][]byte // Path -> content cache (for frequently accessed files)
 }
 
 // VFSConfig holds configuration options for creating a new VFS

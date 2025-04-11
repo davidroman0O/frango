@@ -14,7 +14,7 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	// Normalize virtual path
 	virtualPath = normalizePath(virtualPath)
 
-	// Check for symlinks
+	// First check for symlinks without any locks
 	fileInfo, err := os.Lstat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("error accessing source file '%s': %w", sourcePath, err)
@@ -25,15 +25,14 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 		return fmt.Errorf("symlinks are not supported for security reasons: %s", sourcePath)
 	}
 
-	// Lock the VFS for writing
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Calculate hash for change detection
+	// Calculate hash for change detection without locks
 	hash, err := calculateFileHash(sourcePath)
 	if err != nil {
 		return fmt.Errorf("error calculating hash for '%s': %w", sourcePath, err)
 	}
+
+	// Now lock the VFS for structural changes
+	v.mutex.Lock()
 
 	// Store mappings
 	v.sourceMappings[virtualPath] = sourcePath
@@ -43,11 +42,18 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 		Timestamp: time.Now(),
 	}
 
+	v.mutex.Unlock()
+
 	v.logger.Printf("Added source file: %s -> %s (hash: %s)", sourcePath, virtualPath, truncateHash(hash))
 
 	// Register with global watcher if in development mode
 	if v.developMode {
 		GetGlobalWatcher().RegisterFile(v, sourcePath)
+	} else {
+		// Update path cache
+		v.cacheMutex.Lock()
+		v.pathCache[virtualPath] = sourcePath
+		v.cacheMutex.Unlock()
 	}
 
 	return nil
@@ -238,26 +244,38 @@ func (v *VFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefi
 
 // CreateVirtualFile creates a file directly in the virtual filesystem with provided content
 func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
 	// Normalize virtual path
 	virtualPath = normalizePath(virtualPath)
+
+	// Use fileMutex for file content operations
+	v.fileMutex.Lock()
+	defer v.fileMutex.Unlock()
+
+	// Use mutex for structural changes
+	v.mutex.Lock()
 
 	// Create target directory in VFS temp space
 	targetDir := filepath.Dir(filepath.Join(v.tempDir, virtualPath))
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		v.mutex.Unlock()
 		return fmt.Errorf("error creating directory for virtual file '%s': %w", targetDir, err)
 	}
 
 	// Write to temp path
 	tempPath := filepath.Join(v.tempDir, virtualPath)
+
+	// Release the main lock before I/O
+	v.mutex.Unlock()
+
 	if err := os.WriteFile(tempPath, content, 0644); err != nil {
 		return fmt.Errorf("error writing virtual file to '%s': %w", tempPath, err)
 	}
 
 	// Calculate hash for change detection
 	hash := calculateContentHash(content)
+
+	// Re-acquire lock for map updates
+	v.mutex.Lock()
 
 	// Store mapping
 	v.virtualFiles[virtualPath] = content
@@ -268,7 +286,17 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 		Timestamp: time.Now(),
 	}
 
+	v.mutex.Unlock()
+
 	v.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, truncateHash(hash))
+
+	// Update caches if not in development mode
+	if !v.developMode {
+		v.cacheMutex.Lock()
+		v.pathCache[virtualPath] = tempPath
+		v.contentCache[virtualPath] = content
+		v.cacheMutex.Unlock()
+	}
 
 	return nil
 }
@@ -476,15 +504,16 @@ func (v *VFS) getParentPathAndOrigin(virtualPath string) (string, FileOrigin, er
 
 // DeleteFile removes a file from the VFS
 func (v *VFS) DeleteFile(virtualPath string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
 	// Normalize virtual path
 	virtualPath = normalizePath(virtualPath)
+
+	// Lock for structural changes
+	v.mutex.Lock()
 
 	// Check if file exists in VFS
 	origin, exists := v.fileOrigins[virtualPath]
 	if !exists {
+		v.mutex.Unlock()
 		return fmt.Errorf("file not found in VFS: %s", virtualPath)
 	}
 
@@ -493,19 +522,28 @@ func (v *VFS) DeleteFile(virtualPath string) error {
 		// Instead of deleting, create a virtual "tombstone" file
 		v.virtualFiles[virtualPath] = nil // nil content means "deleted/shadowed"
 		v.fileOrigins[virtualPath] = OriginVirtual
+		v.mutex.Unlock()
+
+		// Invalidate caches
+		v.invalidateCaches(virtualPath)
+
 		v.logger.Printf("Shadowed inherited file: %s", virtualPath)
 		return nil
+	}
+
+	// Get temp file path before removing from maps if applicable
+	var tempPath string
+	if origin == OriginEmbed || origin == OriginVirtual {
+		if path, ok := v.embedMappings[virtualPath]; ok {
+			tempPath = path
+		}
 	}
 
 	// Remove mappings based on origin type
 	if origin == OriginSource {
 		delete(v.sourceMappings, virtualPath)
 	} else if origin == OriginEmbed || origin == OriginVirtual {
-		if tempPath, ok := v.embedMappings[virtualPath]; ok {
-			// Try to remove the temp file but don't error if it fails
-			_ = os.Remove(tempPath)
-			delete(v.embedMappings, virtualPath)
-		}
+		delete(v.embedMappings, virtualPath)
 		delete(v.virtualFiles, virtualPath)
 	}
 
@@ -514,8 +552,26 @@ func (v *VFS) DeleteFile(virtualPath string) error {
 	delete(v.fileHashes, virtualPath)
 	delete(v.changedFiles, virtualPath)
 
+	v.mutex.Unlock()
+
+	// Try to remove the temp file but don't error if it fails
+	if tempPath != "" {
+		_ = os.Remove(tempPath)
+	}
+
+	// Invalidate caches
+	v.invalidateCaches(virtualPath)
+
 	v.logger.Printf("Deleted file from VFS: %s", virtualPath)
 	return nil
+}
+
+// invalidateCaches removes a path from all caches
+func (v *VFS) invalidateCaches(virtualPath string) {
+	v.cacheMutex.Lock()
+	delete(v.pathCache, virtualPath)
+	delete(v.contentCache, virtualPath)
+	v.cacheMutex.Unlock()
 }
 
 // ListFiles returns a list of all files in the VFS
