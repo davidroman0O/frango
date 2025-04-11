@@ -1,4 +1,4 @@
-package frango
+package vfs
 
 import (
 	"crypto/sha256"

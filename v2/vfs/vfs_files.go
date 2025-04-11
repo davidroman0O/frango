@@ -1,4 +1,4 @@
-package frango
+package vfs
 
 import (
 	"embed"
@@ -160,6 +160,21 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 
 	// Write to temp path
 	tempPath := filepath.Join(v.tempDir, virtualPath)
+	
+	// If the path would be the same as the temp directory itself, append a filename
+	// This is a safeguard against trying to write to a directory
+	if tempPath == v.tempDir || tempPath+"/" == v.tempDir+"/" {
+		if v.logger != nil {
+			v.logger.Printf("Warning: Virtual path %s would result in writing to the temp directory itself; appending default filename", virtualPath)
+		}
+		tempPath = filepath.Join(v.tempDir, "frango_globals.php")
+	}
+	
+	// Debug log to help identify path issues
+	if v.logger != nil {
+		v.logger.Printf("Creating embedded file at path: %s (virtual path: %s)", tempPath, virtualPath)
+	}
+
 	if err := os.WriteFile(tempPath, content, 0644); err != nil {
 		return fmt.Errorf("error writing embedded file to '%s': %w", tempPath, err)
 	}
@@ -230,6 +245,12 @@ func (v *VFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefi
 
 			// Write to temp path
 			tempPath := filepath.Join(v.tempDir, virtualEntryPath)
+			if tempPath == v.tempDir || tempPath+"/" == v.tempDir+"/" {
+				if v.logger != nil {
+					v.logger.Printf("Warning: Virtual path %s would result in writing to the temp directory itself; appending default filename", virtualEntryPath)
+				}
+				tempPath = filepath.Join(v.tempDir, "frango_globals.php")
+			}
 			if err := os.WriteFile(tempPath, content, 0644); err != nil {
 				v.logger.Printf("Warning: Could not write embedded file to '%s': %v", tempPath, err)
 				continue
@@ -274,6 +295,17 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 
 	// Write to temp path
 	tempPath := filepath.Join(v.tempDir, virtualPath)
+	if tempPath == v.tempDir || tempPath+"/" == v.tempDir+"/" {
+		if v.logger != nil {
+			v.logger.Printf("Warning: Virtual path %s would result in writing to the temp directory itself; appending default filename", virtualPath)
+		}
+		tempPath = filepath.Join(v.tempDir, "frango_globals.php")
+	}
+	
+	// Debug log to help identify path issues
+	if v.logger != nil {
+		v.logger.Printf("Creating virtual file at path: %s (virtual path: %s)", tempPath, virtualPath)
+	}
 
 	// Release the main lock before I/O
 	v.mutex.Unlock()

@@ -1,5 +1,5 @@
 /*
-Package frango provides a virtual file system for PHP scripts.
+package vfs provides a virtual file system for PHP scripts.
 
 This file is a wrapper around the modular VFS implementation split across multiple files:
 - vfs_types.go: Type definitions and interfaces
@@ -10,7 +10,7 @@ This file is a wrapper around the modular VFS implementation split across multip
 - php_globals.go: PHP globals script and related functionality
 */
 
-package frango
+package vfs
 
 // This file intentionally left minimal as the functionality has been split into
 // separate files for better maintainability.

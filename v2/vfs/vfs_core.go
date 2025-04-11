@@ -1,10 +1,11 @@
-package frango
+package vfs
 
 import (
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -31,7 +32,10 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 
 	// Set default globals provider if not specified
 	if config.GlobalsProvider == nil {
-		config.GlobalsProvider = &DefaultGlobalsProvider{}
+		config.GlobalsProvider = &DefaultGlobalsProvider{
+			Script: "<?php /* Default PHP globals script */ ?>",
+			Path:   "/_frango_php_globals.php",
+		}
 	}
 
 	v := &VFS{
@@ -141,6 +145,11 @@ func (v *VFS) Branch() *VFS {
 func (v *VFS) initializeGlobals() error {
 	// Get globals path from provider
 	globalsPath := v.globalsProvider.GetPHPGlobalsPath()
+	
+	// Make sure globalsPath starts with a slash to avoid treating it as a relative path
+	if !strings.HasPrefix(globalsPath, "/") {
+		globalsPath = "/" + globalsPath
+	}
 
 	// Get script content from provider
 	script := v.globalsProvider.GetPHPGlobalsScript()

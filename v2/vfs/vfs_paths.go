@@ -1,4 +1,4 @@
-package frango
+package vfs
 
 // TrackLogicalPath tracks the logical path corresponding to a physical path.
 // This is used by FrankenPHP to report correct file paths for magic constants like __FILE__.

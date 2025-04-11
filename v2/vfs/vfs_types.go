@@ -1,5 +1,5 @@
 /*
-Package frango provides a virtual file system for PHP scripts.
+package vfs provides a virtual file system for PHP scripts.
 
 Platform-specific notes:
 - Path handling: Different platforms handle paths differently, particularly around:
@@ -16,7 +16,7 @@ Platform-specific notes:
   * Extended character support in filenames
 */
 
-package frango
+package vfs
 
 import (
 	"log"
@@ -64,17 +64,20 @@ type GlobalsProvider interface {
 	GetPHPGlobalsPath() string
 }
 
-// DefaultGlobalsProvider uses the global phpGlobalsScript variable
-type DefaultGlobalsProvider struct{}
-
-// GetPHPGlobalsScript returns the default PHP globals script
-func (p *DefaultGlobalsProvider) GetPHPGlobalsScript() string {
-	return phpGlobalsScript
+// DefaultGlobalsProvider is a basic implementation of GlobalsProvider
+type DefaultGlobalsProvider struct {
+	Script string
+	Path   string
 }
 
-// GetPHPGlobalsPath returns the default path for the PHP globals script
+// GetPHPGlobalsScript returns the provided PHP globals script
+func (p *DefaultGlobalsProvider) GetPHPGlobalsScript() string {
+	return p.Script
+}
+
+// GetPHPGlobalsPath returns the provided path for the PHP globals script
 func (p *DefaultGlobalsProvider) GetPHPGlobalsPath() string {
-	return "/_frango_php_globals.php"
+	return p.Path
 }
 
 // VFS represents a virtual filesystem container for PHP files with branching capability

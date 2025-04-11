@@ -1,5 +1,7 @@
 package frango
 
+import "github.com/davidroman0O/frango/v2/vfs"
+
 // Enhanced PHP globals initialization script with improvements for form handling
 const phpGlobalsScript = `<?php
 /**
@@ -178,14 +180,14 @@ func (p *StandardGlobalsProvider) GetPHPGlobalsPath() string {
 }
 
 // InstallPHPGlobals installs the PHP globals script into a VFS
-func InstallPHPGlobals(vfs *VFS) error {
+func InstallPHPGlobals(vfs *vfs.VFS) error {
 	provider := &StandardGlobalsProvider{}
 	// Create the auto-prepend file in the VFS
 	return vfs.CreateVirtualFile(provider.GetPHPGlobalsPath(), []byte(provider.GetPHPGlobalsScript()))
 }
 
 // UpdateVFS ensures a VFS has the PHP globals script installed
-func UpdateVFS(vfs *VFS) error {
+func UpdateVFS(vfs *vfs.VFS) error {
 	provider := &StandardGlobalsProvider{}
 	globalsPath := provider.GetPHPGlobalsPath()
 
