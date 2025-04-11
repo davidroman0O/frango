@@ -44,6 +44,9 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 
 	v.mutex.Unlock()
 
+	// Track logical path (virtual path) for this physical path
+	v.TrackLogicalPath(sourcePath, virtualPath)
+
 	v.logger.Printf("Added source file: %s -> %s (hash: %s)", sourcePath, virtualPath, truncateHash(hash))
 
 	// Register with global watcher if in development mode
@@ -169,6 +172,11 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 		Timestamp: time.Now(),
 	}
 
+	// Track logical path for this embedded file
+	v.mutex.Unlock()
+	v.TrackLogicalPath(tempPath, virtualPath)
+	v.mutex.Lock()
+
 	v.logger.Printf("Added embedded file mapping: %s -> %s (hash: %s)", virtualPath, tempPath, truncateHash(hash))
 
 	return nil
@@ -287,6 +295,9 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 	}
 
 	v.mutex.Unlock()
+
+	// Track logical path for this virtual file
+	v.TrackLogicalPath(tempPath, virtualPath)
 
 	v.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, truncateHash(hash))
 

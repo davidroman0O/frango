@@ -51,6 +51,7 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 		refCount:        0, // Initialize reference count to 0
 		isCleanedUp:     false,
 		globalsProvider: config.GlobalsProvider,
+		logicalPaths:    make(map[string]string), // Initialize logical paths map
 
 		// Initialize new cache maps
 		pathCache:    make(map[string]string),
@@ -98,7 +99,8 @@ func (v *VFS) Branch() *VFS {
 		inheritedPaths:  make(map[string]bool),
 		developMode:     v.developMode,
 		globalLibs:      make(map[string]string),
-		globalsProvider: v.globalsProvider, // Inherit globals provider from parent
+		globalsProvider: v.globalsProvider,       // Inherit globals provider from parent
+		logicalPaths:    make(map[string]string), // Initialize logical paths map
 
 		// Initialize new cache maps for branch
 		pathCache:    make(map[string]string),

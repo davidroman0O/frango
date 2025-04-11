@@ -76,6 +76,7 @@ type VFS struct {
 	fileOrigins    map[string]FileOrigin // Virtual path -> origin type
 	fileHashes     map[string]FileHash   // Path -> hash info (for change detection)
 	tempDir        string                // Base temp directory for this VFS
+	logicalPaths   map[string]string     // Physical path -> logical path for FrankenPHP
 
 	// Granular mutex locks for different operations
 	mutex      sync.RWMutex // General mutex for structural changes
