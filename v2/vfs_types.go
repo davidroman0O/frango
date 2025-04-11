@@ -38,6 +38,17 @@ const (
 	OriginInherited FileOrigin = "inherited"
 )
 
+// FileChangeEvent represents a file change event
+type FileChangeEvent struct {
+	VirtualPath  string    // The virtual path of the changed file
+	PhysicalPath string    // The physical path of the changed file
+	EventTime    time.Time // When the change was detected
+	ChangeType   string    // Type of change: "modified", "added", "deleted"
+}
+
+// FileChangeHandler is a function type for handling file change events
+type FileChangeHandler func(event FileChangeEvent)
+
 // FileHash stores a hash and timestamp to track file changes
 type FileHash struct {
 	Hash      string    // SHA-256 hash of the file content
@@ -78,6 +89,10 @@ type VFS struct {
 	tempDir        string                // Base temp directory for this VFS
 	logicalPaths   map[string]string     // Physical path -> logical path for FrankenPHP
 
+	// Event system
+	changeHandlers []FileChangeHandler // Handlers for file change events
+	handlerMutex   sync.RWMutex        // Mutex for change handlers
+
 	// Granular mutex locks for different operations
 	mutex      sync.RWMutex // General mutex for structural changes
 	pathMutex  sync.RWMutex // For path resolution operations
@@ -109,4 +124,9 @@ type VFSConfig struct {
 	Logger          *log.Logger     // Logger for VFS operations
 	DevelopMode     bool            // Whether development mode is enabled
 	GlobalsProvider GlobalsProvider // Provider for PHP globals script
+
+	// Auto-reload options
+	EnableAutoReload  bool   // Whether to enable auto-reload functionality
+	AutoReloadScript  string // Custom JavaScript to inject for auto-reload (if empty, default is used)
+	AutoReloadTrigger string // Custom reload trigger mechanism: "websocket", "sse", "polling" (default is "sse")
 }

@@ -169,7 +169,17 @@ func (w *GlobalWatcher) checkAllFiles() {
 
 			// If hash changed, mark file as changed in this VFS
 			if exists && oldHash != newHash {
+				var virtualPath string
+
 				vfs.mutex.Lock()
+				// Find the virtual path corresponding to this physical path
+				for vPath, sourcePath := range vfs.sourceMappings {
+					if sourcePath == filePath {
+						virtualPath = vPath
+						break
+					}
+				}
+
 				vfs.fileHashes[filePath] = FileHash{
 					Hash:      newHash,
 					Timestamp: time.Now(),
@@ -179,6 +189,12 @@ func (w *GlobalWatcher) checkAllFiles() {
 				vfs.logger.Printf("Source file changed: %s (hash: %s -> %s)",
 					filePath, truncateHash(oldHash), truncateHash(newHash))
 				vfs.mutex.Unlock()
+
+				// If we found a virtual path, notify file change handlers
+				if virtualPath != "" {
+					// Call the notification outside of the lock
+					vfs.notifyFileChanged(virtualPath, filePath, "modified")
+				}
 			}
 		}
 	}

@@ -52,6 +52,7 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 		isCleanedUp:     false,
 		globalsProvider: config.GlobalsProvider,
 		logicalPaths:    make(map[string]string), // Initialize logical paths map
+		changeHandlers:  []FileChangeHandler{},   // Initialize empty handlers slice
 
 		// Initialize new cache maps
 		pathCache:    make(map[string]string),
@@ -68,6 +69,11 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 	// Start file watching if in development mode
 	if config.DevelopMode {
 		v.startWatching()
+
+		// If auto-reload is enabled, set it up
+		if config.EnableAutoReload {
+			v.EnableAutoReload(config)
+		}
 	}
 
 	return v, nil
@@ -101,6 +107,7 @@ func (v *VFS) Branch() *VFS {
 		globalLibs:      make(map[string]string),
 		globalsProvider: v.globalsProvider,       // Inherit globals provider from parent
 		logicalPaths:    make(map[string]string), // Initialize logical paths map
+		changeHandlers:  []FileChangeHandler{},   // Initialize empty handlers slice
 
 		// Initialize new cache maps for branch
 		pathCache:    make(map[string]string),

@@ -52,6 +52,9 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	// Register with global watcher if in development mode
 	if v.developMode {
 		GetGlobalWatcher().RegisterFile(v, sourcePath)
+
+		// Notify file added event
+		v.notifyFileChanged(virtualPath, sourcePath, "added")
 	} else {
 		// Update path cache
 		v.cacheMutex.Lock()
@@ -528,6 +531,14 @@ func (v *VFS) DeleteFile(virtualPath string) error {
 		return fmt.Errorf("file not found in VFS: %s", virtualPath)
 	}
 
+	// Get the physical path before removing from maps if applicable
+	var physicalPath string
+	if origin == OriginSource {
+		physicalPath = v.sourceMappings[virtualPath]
+	} else if origin == OriginEmbed || origin == OriginVirtual {
+		physicalPath = v.embedMappings[virtualPath]
+	}
+
 	// Special handling for inherited paths - we need to shadow them
 	if origin == OriginInherited {
 		// Instead of deleting, create a virtual "tombstone" file
@@ -537,6 +548,11 @@ func (v *VFS) DeleteFile(virtualPath string) error {
 
 		// Invalidate caches
 		v.invalidateCaches(virtualPath)
+
+		// Notify shadowed file event if in development mode
+		if v.developMode && physicalPath != "" {
+			v.notifyFileChanged(virtualPath, physicalPath, "shadowed")
+		}
 
 		v.logger.Printf("Shadowed inherited file: %s", virtualPath)
 		return nil
@@ -572,6 +588,11 @@ func (v *VFS) DeleteFile(virtualPath string) error {
 
 	// Invalidate caches
 	v.invalidateCaches(virtualPath)
+
+	// Notify file deleted event if in development mode
+	if v.developMode && physicalPath != "" {
+		v.notifyFileChanged(virtualPath, physicalPath, "deleted")
+	}
 
 	v.logger.Printf("Deleted file from VFS: %s", virtualPath)
 	return nil
