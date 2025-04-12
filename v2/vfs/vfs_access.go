@@ -320,3 +320,18 @@ func (vfs *VFS) ResolvePathLiteral(virtualPath string) (string, error) {
 
 	return "", fmt.Errorf("virtual path not found: %s", virtualPath)
 }
+
+// GetTempDir returns the temporary directory used by this VFS
+func (v *VFS) GetTempDir() string {
+	return v.tempDir
+}
+
+// GetName returns the name/ID of this VFS
+func (v *VFS) GetName() string {
+	return v.name
+}
+
+// ListFilesIn lists all files in a specific directory within the VFS
+func (v *VFS) ListFilesIn(virtualDir string) ([]string, error) {
+	return v.listFilesIn(virtualDir) 
+}
