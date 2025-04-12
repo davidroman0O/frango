@@ -2,7 +2,6 @@ package executor
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,13 +18,17 @@ func (e *Executor) sanitizePathForChdir(path string) string {
 }
 
 // resolveScriptPath determines the absolute path to the PHP script to execute.
-// It checks the VFS first, then falls back to the filesystem if configured.
+// It only uses the VFS to resolve paths.
 func (e *Executor) resolveScriptPath(vfs *vfs.VFS, scriptPath string) (string, bool, error) {
 	logger := e.config.Logger
-	sourceDir := e.config.SourceDir
 
 	if logger != nil {
 		logger.Printf("Executor: Resolving script path for '%s'", scriptPath)
+	}
+
+	// Ensure VFS is available
+	if vfs == nil {
+		return "", false, fmt.Errorf("VFS is required to resolve script path for '%s'", scriptPath)
 	}
 
 	// 1. Try resolving directly within the VFS
@@ -51,7 +54,7 @@ func (e *Executor) resolveScriptPath(vfs *vfs.VFS, scriptPath string) (string, b
 			logger.Printf("Executor: Parameterized script '%s' not found in VFS with literal resolution: %v", scriptPath, err)
 		}
 
-		// Try to find a matching file pattern similar to resolveParameterizedPath in execute.go
+		// Try to find a matching file pattern similar to resolveParameterizedPath
 		dirPath := filepath.Dir(scriptPath)
 		fileName := filepath.Base(scriptPath)
 
@@ -80,64 +83,11 @@ func (e *Executor) resolveScriptPath(vfs *vfs.VFS, scriptPath string) (string, b
 		}
 	}
 
-	// 2. If not found in VFS and SourceDir is configured, try filesystem relative to SourceDir
-	if sourceDir != "" {
-		potentialPath := filepath.Join(sourceDir, strings.TrimPrefix(scriptPath, "/"))
-		potentialPath = filepath.Clean(potentialPath) // Clean the path
-
-		if logger != nil {
-			logger.Printf("Executor: Checking filesystem path relative to SourceDir: %s", potentialPath)
-		}
-
-		// Security check: Ensure the resolved path is still within the SourceDir
-		if !strings.HasPrefix(potentialPath, filepath.Clean(sourceDir)+string(filepath.Separator)) && potentialPath != filepath.Clean(sourceDir) {
-			if logger != nil {
-				logger.Printf("Executor: Filesystem path '%s' is outside SourceDir '%s'. Denying access.", potentialPath, sourceDir)
-			}
-			// Return the original VFS error if the filesystem path is outside the allowed dir
-			return "", false, fmt.Errorf("script '%s' not found in VFS and filesystem path is outside allowed directory", scriptPath)
-		}
-
-		// Check if the file exists on the filesystem
-		if _, fsErr := os.Stat(potentialPath); fsErr == nil {
-			if logger != nil {
-				logger.Printf("Executor: Found script on filesystem: %s", potentialPath)
-			}
-
-			// Try to add this file to the VFS for future access
-			if addErr := vfs.AddSourceFile(potentialPath, scriptPath); addErr != nil {
-				logger.Printf("Executor: Warning - Failed to add source file to VFS: %v", addErr)
-			} else {
-				// Try to resolve path again through VFS now that we've added it
-				resolvedPath, resolveErr := vfs.ResolvePath(scriptPath)
-				if resolveErr == nil {
-					return resolvedPath, true, nil
-				}
-			}
-
-			// If adding to VFS fails, return the filesystem path
-			return potentialPath, false, nil
-		} else if logger != nil {
-			logger.Printf("Executor: Script not found on filesystem at '%s': %v", potentialPath, fsErr)
-
-			// Try stripping a prefix - this was in the original ensurePhpFileExists
-			parts := strings.SplitN(scriptPath, "/", 2)
-			if len(parts) > 1 {
-				sourcePath := filepath.Join(sourceDir, parts[1])
-				logger.Printf("Executor: Trying source path (without prefix): %s", sourcePath)
-				if _, err := os.Stat(sourcePath); err == nil {
-					logger.Printf("Executor: Found file after stripping prefix: %s", sourcePath)
-					return sourcePath, false, nil
-				}
-			}
-		}
-	}
-
-	// 3. If not found anywhere, return the original VFS error
+	// If not found anywhere in VFS, return the error
 	if logger != nil {
-		logger.Printf("Executor: Script '%s' could not be resolved in VFS or filesystem.", scriptPath)
+		logger.Printf("Executor: Script '%s' could not be resolved in VFS.", scriptPath)
 	}
-	return "", false, fmt.Errorf("script '%s' not found in VFS or configured filesystem source", scriptPath)
+	return "", false, fmt.Errorf("script '%s' not found in VFS", scriptPath)
 }
 
 // extractPathParams extracts path parameters from a URL pattern and actual path
@@ -516,64 +466,13 @@ func (e *Executor) resolveParameterizedPath(vfs interface {
 	return "", fmt.Errorf("no matching file found for parameterized path: %s", scriptPath)
 }
 
-// ensurePhpFileExists verifies that the PHP file exists and attempts to locate it if not
+// ensurePhpFileExists verifies that the PHP file exists through the VFS
 func (e *Executor) ensurePhpFileExists(phpFilePath, scriptPath string) string {
 	logger := e.config.Logger
 	if logger != nil {
-		logger.Printf("Checking if resolved phpFilePath exists: %s", phpFilePath)
+		logger.Printf("Using resolved PHP file path: %s", phpFilePath)
 	}
 
-	_, fileErr := os.Stat(phpFilePath)
-	if fileErr == nil {
-		if logger != nil {
-			logger.Printf("Resolved phpFilePath exists: %s", phpFilePath)
-		}
-		return phpFilePath
-	}
-
-	if logger != nil {
-		logger.Printf("WARNING: Cannot access phpFilePath: %v", fileErr)
-	}
-
-	// Try to find it in the source directory
-	if e.config.SourceDir != "" && !filepath.IsAbs(phpFilePath) {
-		// Try direct path in source directory
-		sourcePath := filepath.Join(e.config.SourceDir, phpFilePath)
-		if logger != nil {
-			logger.Printf("Trying source path: %s", sourcePath)
-		}
-
-		if _, err := os.Stat(sourcePath); err == nil {
-			if logger != nil {
-				logger.Printf("Found file in source directory: %s", sourcePath)
-			}
-			return sourcePath
-		}
-
-		// Try stripping a prefix
-		parts := strings.SplitN(phpFilePath, "/", 2)
-		if len(parts) > 1 {
-			sourcePath := filepath.Join(e.config.SourceDir, parts[1])
-			if logger != nil {
-				logger.Printf("Trying source path (without prefix): %s", sourcePath)
-			}
-			if _, err := os.Stat(sourcePath); err == nil {
-				if logger != nil {
-					logger.Printf("Found file after stripping prefix: %s", sourcePath)
-				}
-				return sourcePath
-			}
-		}
-	}
-
-	// Final verification
-	_, fileErr = os.Stat(phpFilePath)
-	if fileErr != nil {
-		if logger != nil {
-			logger.Printf("ERROR: Failed to locate PHP file after all resolution attempts: %v", fileErr)
-		}
-		return ""
-	}
-
+	// VFS should have already validated this path, so we trust it
 	return phpFilePath
 }

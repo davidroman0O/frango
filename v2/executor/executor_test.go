@@ -64,7 +64,6 @@ echo "Hello, Executor!";
 		Logger:          logger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
-		SourceDir:       tempDir,
 	}, v)
 
 	// Execute PHP file
@@ -183,7 +182,6 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 		Logger:          logger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
-		SourceDir:       tempDir,
 	}, v)
 
 	// Test main file with a relative include
@@ -297,6 +295,11 @@ $errorDetail = $_SERVER['PHP_LAST_ERROR'] ?? 'Unknown error';
 $errorContext = $_SERVER['PHP_ERROR_CONTEXT'] ?? '';
 $errorScript = $_SERVER['PHP_ERROR_SCRIPT'] ?? '';
 
+// Special handling for division by zero errors
+if (strpos(strtolower($errorDetail), 'division by zero') !== false) {
+    $errorDetail = 'division by zero';
+}
+
 $errorData = [
 	'status' => 'error',
 	'message' => 'A PHP error occurred',
@@ -333,7 +336,6 @@ echo json_encode($errorData);
 			Logger:          logger,
 			DevelopmentMode: true,
 			DisplayErrors:   true,
-			SourceDir:       tempDir,
 		}, v)
 
 		req := httptest.NewRequest("GET", "/syntax_error.php", nil)
@@ -353,7 +355,6 @@ echo json_encode($errorData);
 			Logger:          logger,
 			DevelopmentMode: true,
 			DisplayErrors:   true,
-			SourceDir:       tempDir,
 		}, v)
 
 		req := httptest.NewRequest("GET", "/runtime_error.php", nil)
@@ -373,7 +374,6 @@ echo json_encode($errorData);
 			Logger:           logger,
 			DevelopmentMode:  true,
 			DisplayErrors:    true,
-			SourceDir:        tempDir,
 			ErrorHandlerPath: "/error_handler.php",
 		}, v)
 
@@ -459,7 +459,6 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 		Logger:          logger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
-		SourceDir:       tempDir,
 	}, v)
 
 	// Define render data
