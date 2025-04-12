@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/frango/v2/php"
-	"github.com/davidroman0O/frango/v2/vfs"
+	"github.com/davidroman0O/frango/v2/pkg/php"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 

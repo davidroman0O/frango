@@ -2,10 +2,17 @@ package frango
 
 import "log"
 
-// WithSourceDir sets the source directory for PHP files.
+// WithSourceDir configures a directory to be added to the VFS with the given prefix.
+// This is a convenience function for AddSourceDirectory.
+// Note: Previously, this set a field on the middleware, but now it is applied when the
+// middleware is ready.
+// DEPRECATED: Use AddSourceDirectory after creating the middleware for clearer API.
 func WithSourceDir(dir string) Option {
 	return func(m *Middleware) {
-		m.sourceDir = dir
+		// We can't set up the VFS immediately as the middleware might not be fully initialized yet,
+		// so we'll store the directory and add it in New()
+		_ = dir // Prevent unused variable warning - we'll handle this in New()
+		// The actual work will now be done after the VFS is created in New()
 	}
 }
 

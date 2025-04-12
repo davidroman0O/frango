@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/davidroman0O/frango/v2/vfs"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 )
 
 // sanitizePathForChdir removes path parameters from a path to make it valid for chdir()

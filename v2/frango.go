@@ -11,15 +11,14 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/davidroman0O/frango/v2/executor"
 	"github.com/davidroman0O/frango/v2/internal/utils"
-	"github.com/davidroman0O/frango/v2/vfs"
+	"github.com/davidroman0O/frango/v2/pkg/executor"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 
 // Middleware is the core Frango PHP middleware for Go applications
 type Middleware struct {
-	sourceDir          string      // Main source directory for PHP files
 	tempDir            string      // Base temporary directory
 	logger             *log.Logger // Logger for operations
 	initialized        bool        // Whether the middleware has been initialized
@@ -45,7 +44,6 @@ type ContextKey string
 func New(opts ...Option) (*Middleware, error) {
 	// Default configuration
 	m := &Middleware{
-		sourceDir:          "",
 		tempDir:            os.TempDir(),
 		logger:             log.New(os.Stderr, "[frango] ", log.LstdFlags),
 		blockDirectPHPURLs: true,
@@ -87,29 +85,17 @@ func New(opts ...Option) (*Middleware, error) {
 		m.logger.Println("FrankenPHP initialized successfully")
 	}
 
-	// Create initial root VFS if source dir is specified
-	if m.sourceDir != "" {
-		m.vfsCreateLock.Lock()
-		defer m.vfsCreateLock.Unlock()
+	// Create initial root VFS
+	m.vfsCreateLock.Lock()
+	defer m.vfsCreateLock.Unlock()
 
-		var err error
-		m.rootVFS, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create root VFS: %w", err)
-		}
-
-		// Add the source directory to the root VFS
-		if err := m.rootVFS.AddSourceDirectory(m.sourceDir, "/"); err != nil {
-			return nil, fmt.Errorf("failed to add source directory to VFS: %w", err)
-		}
+	var err error
+	m.rootVFS, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create root VFS: %w", err)
 	}
 
 	return m, nil
-}
-
-// SourceDir returns the configured source directory
-func (m *Middleware) SourceDir() string {
-	return m.sourceDir
 }
 
 // TempDir returns the temporary directory used by the middleware
@@ -435,7 +421,7 @@ func (m *Middleware) Render(scriptPath string, renderFn RenderData) http.Handler
 
 	// Check if file exists in VFS
 	if !vfs.FileExists(scriptPath) {
-		// Try to resolve as a path relative to sourceDir
+		// Try to normalize the path according to VFS conventions
 		absPath := m.resolveScriptPath(scriptPath)
 		if absPath != "" && vfs.FileExists(absPath) {
 			scriptPath = absPath
@@ -465,7 +451,7 @@ func (m *Middleware) ForVFS(vfs *vfs.VFS, scriptPath string) http.Handler {
 
 		// Check if file exists in VFS
 		if !vfs.FileExists(scriptPath) {
-			// Try to resolve as a path relative to sourceDir
+			// Try to normalize the path according to VFS conventions
 			absPath := m.resolveScriptPath(scriptPath)
 			if absPath != "" && vfs.FileExists(absPath) {
 				scriptPath = absPath
@@ -485,7 +471,7 @@ func (m *Middleware) RenderVFS(vfs *vfs.VFS, scriptPath string, renderFn RenderD
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if file exists in VFS
 		if !vfs.FileExists(scriptPath) {
-			// Try to resolve as a path relative to sourceDir
+			// Try to normalize the path according to VFS conventions
 			absPath := m.resolveScriptPath(scriptPath)
 			if absPath != "" && vfs.FileExists(absPath) {
 				scriptPath = absPath
@@ -500,24 +486,21 @@ func (m *Middleware) RenderVFS(vfs *vfs.VFS, scriptPath string, renderFn RenderD
 	})
 }
 
-// resolveScriptPath resolves a script path to an absolute path
+// resolveScriptPath resolves a script path to a properly formatted VFS path
 func (m *Middleware) resolveScriptPath(scriptPath string) string {
-	// If it's already absolute, return as is
+	// If it's already absolute filesystem path, we can't use it directly with VFS
+	// Return empty to indicate resolution failure
 	if filepath.IsAbs(scriptPath) {
-		return scriptPath
+		return ""
 	}
 
-	// If it's a virtual path (starts with /), return as is
+	// If it's a virtual path (starts with /), ensure it's properly formatted
 	if strings.HasPrefix(scriptPath, "/") {
 		return scriptPath
 	}
 
-	// Otherwise, join with sourceDir
-	if m.sourceDir != "" {
-		return filepath.Join("/", scriptPath)
-	}
-
-	return ""
+	// Convert relative path to virtual path with leading slash
+	return "/" + scriptPath
 }
 
 // ExecuteWithExecutor handles execution of a PHP script through the VFS using the executor module.
@@ -528,7 +511,6 @@ func (m *Middleware) ExecuteWithExecutor(vfs *vfs.VFS, scriptPath string, render
 		DevelopmentMode:  m.developmentMode,
 		DisplayErrors:    m.displayErrors,
 		ErrorHandlerPath: m.errorHandlerPath,
-		SourceDir:        m.sourceDir,
 	}, vfs)
 
 	// Log execution start

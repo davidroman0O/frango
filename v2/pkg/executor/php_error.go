@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/davidroman0O/frango/v2/php"
+	"github.com/davidroman0O/frango/v2/pkg/php"
 )
 
 // PHP error types and patterns for detection

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davidroman0O/frango/v2/vfs"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 

@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/davidroman0O/frango/v2/php"
+	"github.com/davidroman0O/frango/v2/pkg/php"
 )
 
 // calculateScriptPathHash generates a hash for a given script path.
