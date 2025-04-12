@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
 // GetFileContent reads the content of a file from the VFS
@@ -206,7 +208,7 @@ func (v *VFS) ResolvePath(virtualPath string) (string, error) {
 			// Check for changes without locking
 			if _, err := os.Stat(sourcePath); err == nil {
 				// Check hash without locks
-				newHash, err := calculateFileHash(sourcePath)
+				newHash, err := utils.CalculateFileHash(sourcePath)
 				if err == nil && newHash != oldHash {
 					// Take mutex lock to update hash if changed
 					v.mutex.Lock()
@@ -219,7 +221,7 @@ func (v *VFS) ResolvePath(virtualPath string) (string, error) {
 					v.mutex.Unlock()
 
 					v.logger.Printf("Source file changed: %s (path: %s)", virtualPath, sourcePath)
-					v.logger.Printf("  Hash: %s -> %s", truncateHash(oldHash), truncateHash(newHash))
+					v.logger.Printf("  Hash: %s -> %s", utils.TruncateHash(oldHash, 8), utils.TruncateHash(newHash, 8))
 				}
 			}
 			// Re-acquire path mutex after checks
@@ -333,5 +335,5 @@ func (v *VFS) GetName() string {
 
 // ListFilesIn lists all files in a specific directory within the VFS
 func (v *VFS) ListFilesIn(virtualDir string) ([]string, error) {
-	return v.listFilesIn(virtualDir) 
+	return v.listFilesIn(virtualDir)
 }

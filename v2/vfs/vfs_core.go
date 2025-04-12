@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
 // NewVFS creates a new virtual filesystem
@@ -22,7 +24,7 @@ func NewVFS(tempDir string, logger *log.Logger, developMode bool) (*VFS, error) 
 // NewVFSWithConfig creates a new virtual filesystem with the specified configuration
 func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 	// Create unique ID for this VFS
-	id := generateVFSID()
+	id := utils.GenerateUniqueID()
 
 	// Create base temp directory for this VFS
 	vfsTempDir := filepath.Join(config.TempDir, "vfs-"+id)
@@ -95,14 +97,14 @@ func (v *VFS) Branch() *VFS {
 	}
 
 	branchVFS := &VFS{
-		name:            generateVFSID(),
+		name:            utils.GenerateUniqueID(),
 		parent:          v,
 		sourceMappings:  make(map[string]string),
 		embedMappings:   make(map[string]string),
 		virtualFiles:    make(map[string][]byte),
 		fileOrigins:     make(map[string]FileOrigin),
 		fileHashes:      make(map[string]FileHash),
-		tempDir:         filepath.Join(filepath.Dir(v.tempDir), "vfs-branch-"+generateVFSID()),
+		tempDir:         filepath.Join(filepath.Dir(v.tempDir), "vfs-branch-"+utils.GenerateUniqueID()),
 		watchStop:       make(chan bool),
 		logger:          v.logger,
 		changedFiles:    make(map[string]bool),
@@ -145,7 +147,7 @@ func (v *VFS) Branch() *VFS {
 func (v *VFS) initializeGlobals() error {
 	// Get globals path from provider
 	globalsPath := v.globalsProvider.GetPHPGlobalsPath()
-	
+
 	// Make sure globalsPath starts with a slash to avoid treating it as a relative path
 	if !strings.HasPrefix(globalsPath, "/") {
 		globalsPath = "/" + globalsPath

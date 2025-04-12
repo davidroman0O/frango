@@ -1,4 +1,4 @@
-package frango
+package utils
 
 import (
 	"crypto/sha256"
@@ -11,15 +11,16 @@ import (
 	"time"
 )
 
-// generateUniqueID generates a unique identifier for VFS instances or middleware
-func generateUniqueID() string {
+// GenerateUniqueID generates a unique identifier
+// Useful for creating unique identifiers for VFS instances or middleware
+func GenerateUniqueID() string {
 	hash := sha256.New()
 	hash.Write([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
 	return hex.EncodeToString(hash.Sum(nil))[:8]
 }
 
-// calculateFileHash calculates the SHA256 hash of a file's content
-func calculateFileHash(filePath string) (string, error) {
+// CalculateFileHash calculates the SHA256 hash of a file's content
+func CalculateFileHash(filePath string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open file '%s': %w", filePath, err)
@@ -32,8 +33,15 @@ func calculateFileHash(filePath string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyFile copies a file from src to dst, creating parent directories as needed
-func copyFile(src, dst string) error {
+// CalculateContentHash calculates the SHA256 hash of content
+func CalculateContentHash(content []byte) string {
+	h := sha256.New()
+	h.Write(content)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// CopyFile copies a file from src to dst, creating parent directories as needed
+func CopyFile(src, dst string) error {
 	sourceFileStat, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -58,8 +66,8 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// resolveDirectory resolves a directory path, supporting both absolute and relative paths
-func resolveDirectory(path string) (string, error) {
+// ResolveDirectory resolves a directory path, supporting both absolute and relative paths
+func ResolveDirectory(path string) (string, error) {
 	// If the path is absolute, just return it
 	if filepath.IsAbs(path) {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
@@ -92,7 +100,7 @@ func resolveDirectory(path string) (string, error) {
 		}
 
 		// Try to find repository root
-		repoRoot, err := findRepoRoot(callerDir)
+		repoRoot, err := FindRepoRoot(callerDir)
 		if err == nil {
 			repoRelPath := filepath.Join(repoRoot, path)
 			if info, err := os.Stat(repoRelPath); err == nil && info.IsDir() {
@@ -107,8 +115,8 @@ func resolveDirectory(path string) (string, error) {
 	return "", fmt.Errorf("directory '%s' not found", path)
 }
 
-// findRepoRoot attempts to find the root directory of a Git repository
-func findRepoRoot(startDir string) (string, error) {
+// FindRepoRoot attempts to find the root directory of a Git repository
+func FindRepoRoot(startDir string) (string, error) {
 	dir := startDir
 	for {
 		// Check if .git directory exists
@@ -126,4 +134,15 @@ func findRepoRoot(startDir string) (string, error) {
 		dir = parent
 	}
 	return "", fmt.Errorf("no git repository found in ancestry of %s", startDir)
+}
+
+// TruncateHash truncates a hash to a shorter version for display purposes
+func TruncateHash(hash string, length int) string {
+	if length <= 0 {
+		length = 8
+	}
+	if len(hash) > length {
+		return hash[:length] + "..."
+	}
+	return hash
 }

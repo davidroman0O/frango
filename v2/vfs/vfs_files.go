@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
 // AddSourceFile adds a file from the filesystem to the VFS
@@ -26,7 +28,7 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	}
 
 	// Calculate hash for change detection without locks
-	hash, err := calculateFileHash(sourcePath)
+	hash, err := utils.CalculateFileHash(sourcePath)
 	if err != nil {
 		return fmt.Errorf("error calculating hash for '%s': %w", sourcePath, err)
 	}
@@ -47,7 +49,7 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	// Track logical path (virtual path) for this physical path
 	v.TrackLogicalPath(sourcePath, virtualPath)
 
-	v.logger.Printf("Added source file: %s -> %s (hash: %s)", sourcePath, virtualPath, truncateHash(hash))
+	v.logger.Printf("Added source file: %s -> %s (hash: %s)", sourcePath, virtualPath, utils.TruncateHash(hash, 8))
 
 	// Register with global watcher if in development mode
 	if v.developMode {
@@ -160,7 +162,7 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 
 	// Write to temp path
 	tempPath := filepath.Join(v.tempDir, virtualPath)
-	
+
 	// If the path would be the same as the temp directory itself, append a filename
 	// This is a safeguard against trying to write to a directory
 	if tempPath == v.tempDir || tempPath+"/" == v.tempDir+"/" {
@@ -169,7 +171,7 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 		}
 		tempPath = filepath.Join(v.tempDir, "frango_globals.php")
 	}
-	
+
 	// Debug log to help identify path issues
 	if v.logger != nil {
 		v.logger.Printf("Creating embedded file at path: %s (virtual path: %s)", tempPath, virtualPath)
@@ -180,7 +182,7 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 	}
 
 	// Calculate hash for change detection
-	hash := calculateContentHash(content)
+	hash := utils.CalculateContentHash(content)
 
 	// Store mapping
 	v.embedMappings[virtualPath] = tempPath
@@ -195,7 +197,7 @@ func (v *VFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath strin
 	v.TrackLogicalPath(tempPath, virtualPath)
 	v.mutex.Lock()
 
-	v.logger.Printf("Added embedded file mapping: %s -> %s (hash: %s)", virtualPath, tempPath, truncateHash(hash))
+	v.logger.Printf("Added embedded file mapping: %s -> %s (hash: %s)", virtualPath, tempPath, utils.TruncateHash(hash, 8))
 
 	return nil
 }
@@ -257,7 +259,7 @@ func (v *VFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefi
 			}
 
 			// Calculate hash for change detection
-			hash := calculateContentHash(content)
+			hash := utils.CalculateContentHash(content)
 
 			// Store mapping
 			v.embedMappings[virtualEntryPath] = tempPath
@@ -267,7 +269,7 @@ func (v *VFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefi
 				Timestamp: time.Now(),
 			}
 
-			v.logger.Printf("Added embedded file from directory: %s -> %s (hash: %s)", virtualEntryPath, tempPath, truncateHash(hash))
+			v.logger.Printf("Added embedded file from directory: %s -> %s (hash: %s)", virtualEntryPath, tempPath, utils.TruncateHash(hash, 8))
 		}
 	}
 
@@ -301,7 +303,7 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 		}
 		tempPath = filepath.Join(v.tempDir, "frango_globals.php")
 	}
-	
+
 	// Debug log to help identify path issues
 	if v.logger != nil {
 		v.logger.Printf("Creating virtual file at path: %s (virtual path: %s)", tempPath, virtualPath)
@@ -315,7 +317,7 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 	}
 
 	// Calculate hash for change detection
-	hash := calculateContentHash(content)
+	hash := utils.CalculateContentHash(content)
 
 	// Re-acquire lock for map updates
 	v.mutex.Lock()
@@ -334,7 +336,7 @@ func (v *VFS) CreateVirtualFile(virtualPath string, content []byte) error {
 	// Track logical path for this virtual file
 	v.TrackLogicalPath(tempPath, virtualPath)
 
-	v.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, truncateHash(hash))
+	v.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, utils.TruncateHash(hash, 8))
 
 	// Update caches if not in development mode
 	if !v.developMode {

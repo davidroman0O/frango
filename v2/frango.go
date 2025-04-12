@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/davidroman0O/frango/v2/executor"
+	"github.com/davidroman0O/frango/v2/internal/utils"
 	"github.com/davidroman0O/frango/v2/vfs"
 	"github.com/dunglas/frankenphp"
 )
@@ -63,7 +64,7 @@ func New(opts ...Option) (*Middleware, error) {
 	}
 
 	// Create a unique temp dir for this instance
-	instanceTempDir := filepath.Join(m.tempDir, "frango-"+generateUniqueID())
+	instanceTempDir := filepath.Join(m.tempDir, "frango-"+utils.GenerateUniqueID())
 	if err := os.MkdirAll(instanceTempDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}

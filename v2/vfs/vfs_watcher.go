@@ -4,6 +4,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
 // GlobalWatcher provides a centralized system for watching file changes across all VFS instances
@@ -152,7 +154,7 @@ func (w *GlobalWatcher) checkAllFiles() {
 		}
 
 		// Calculate new hash
-		newHash, err := calculateFileHash(filePath)
+		newHash, err := utils.CalculateFileHash(filePath)
 		if err != nil {
 			continue
 		}
@@ -187,7 +189,7 @@ func (w *GlobalWatcher) checkAllFiles() {
 				vfs.changedFiles[filePath] = true
 				vfs.invalidated = true
 				vfs.logger.Printf("Source file changed: %s (hash: %s -> %s)",
-					filePath, truncateHash(oldHash), truncateHash(newHash))
+					filePath, utils.TruncateHash(oldHash, 8), utils.TruncateHash(newHash, 8))
 				vfs.mutex.Unlock()
 
 				// If we found a virtual path, notify file change handlers

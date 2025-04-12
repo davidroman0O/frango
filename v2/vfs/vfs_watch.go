@@ -3,6 +3,8 @@ package vfs
 import (
 	"os"
 	"time"
+
+	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
 // checkFileChanges checks a specific file for changes
@@ -26,7 +28,7 @@ func (v *VFS) checkFileChanges(virtualPath string) {
 	}
 
 	// Calculate new hash
-	newHash, err := calculateFileHash(sourcePath)
+	newHash, err := utils.CalculateFileHash(sourcePath)
 	if err != nil {
 		v.logger.Printf("Warning: Could not calculate hash for '%s': %v", sourcePath, err)
 		return
@@ -35,7 +37,7 @@ func (v *VFS) checkFileChanges(virtualPath string) {
 	// Check if hash changed
 	if newHash != oldHash {
 		v.logger.Printf("Source file changed: %s (path: %s)", virtualPath, sourcePath)
-		v.logger.Printf("  Hash: %s -> %s", truncateHash(oldHash), truncateHash(newHash))
+		v.logger.Printf("  Hash: %s -> %s", utils.TruncateHash(oldHash, 8), utils.TruncateHash(newHash, 8))
 
 		// Update hash
 		v.fileHashes[virtualPath] = FileHash{
@@ -47,11 +49,4 @@ func (v *VFS) checkFileChanges(virtualPath string) {
 		v.changedFiles[virtualPath] = true
 		v.invalidated = true
 	}
-}
-
-// checkForChanges is kept for backward compatibility
-// This simply forwards to the more efficient global watcher implementation
-func (v *VFS) checkForChanges() {
-	// This is now handled by the global watcher
-	// Left as a no-op for backward compatibility
 }
