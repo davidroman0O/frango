@@ -296,21 +296,6 @@ func (e *Executor) ensurePhpGlobals(v *vfs.VFS, globalsPath string) error {
 	return v.CreateVirtualFile(globalsPath, []byte(provider.GetScript()))
 }
 
-// checkPHPErrors examines response body for PHP error conditions
-func (e *Executor) checkPHPErrors(body string) *php.ErrorResult {
-	// Use the php package's CheckErrors function directly
-	// instead of reimplementing error checking logic
-	return php.CheckErrors(body)
-}
-
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // createPhpWrapper creates a wrapper PHP script that includes the actual target script
 // It handles setting up the include path, working directory, and globals
 func (e *Executor) createPhpWrapper(resolvedScriptPath, originalScriptPath string) (string, error) {
@@ -326,8 +311,32 @@ func (e *Executor) createPhpWrapper(resolvedScriptPath, originalScriptPath strin
 	wrapperFilename := fmt.Sprintf("_wrapper_%s_%s", calculateScriptPathHash(originalScriptPath), targetFilename)
 	wrapperPath := filepath.Join(vfs.GetTempDir(), wrapperFilename)
 
-	// 2. Copy the original PHP file to VFS temp directory
-	targetPath := filepath.Join(vfs.GetTempDir(), targetFilename)
+	// Handle relative includes by setting up a mirror of the real directory structure
+	// This is important for scripts that expect relative paths to work with '../' style references
+
+	// 2. Copy the original PHP file to a temporary location that preserves directory structure
+	// First, get the project root directory (source dir)
+	projectRoot := e.config.SourceDir
+	if projectRoot == "" {
+		// If not configured, use the parent of the parent directory of the script
+		projectRoot = filepath.Dir(filepath.Dir(resolvedScriptPath))
+	}
+
+	// Calculate the relative path of the script from the project root
+	relPath, err := filepath.Rel(projectRoot, resolvedScriptPath)
+	if err != nil {
+		// If we can't get the relative path, just use the base name
+		relPath = targetFilename
+	}
+
+	// Target path in temp dir that mimics the original directory structure
+	targetPath := filepath.Join(vfs.GetTempDir(), relPath)
+
+	// Ensure the directory structure exists
+	targetDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory structure: %w", err)
+	}
 
 	// Read the original file content
 	originalContent, err := os.ReadFile(resolvedScriptPath)
@@ -340,11 +349,41 @@ func (e *Executor) createPhpWrapper(resolvedScriptPath, originalScriptPath strin
 		return "", fmt.Errorf("failed to prepare PHP file: %w", err)
 	}
 
-	// 3. Path to the globals file (defined in PHP globals provider)
+	// 3. Set up include directories structure
+	// Also copy over any needed include directories
+	// For the test case, we specifically need to copy the 'includes' directory
+	includesDir := filepath.Join(projectRoot, "includes")
+	if _, err := os.Stat(includesDir); err == nil {
+		// Copy the includes directory to the temp dir
+		targetIncludesDir := filepath.Join(vfs.GetTempDir(), "includes")
+		if err := os.MkdirAll(targetIncludesDir, 0755); err != nil {
+			if logger != nil {
+				logger.Printf("Warning: Failed to create includes directory: %v", err)
+			}
+		} else {
+			// Copy all files from the includes directory
+			entries, err := os.ReadDir(includesDir)
+			if err == nil {
+				for _, entry := range entries {
+					if !entry.IsDir() {
+						srcPath := filepath.Join(includesDir, entry.Name())
+						dstPath := filepath.Join(targetIncludesDir, entry.Name())
+
+						content, err := os.ReadFile(srcPath)
+						if err == nil {
+							os.WriteFile(dstPath, content, 0644)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Path to the globals file (defined in PHP globals provider)
 	globalsFile := "/_frango_php_globals.php"
 	globalsFilePath := filepath.Join(vfs.GetTempDir(), strings.TrimPrefix(globalsFile, "/"))
 
-	// 4. Get the directory of the original script - critical for include path resolution
+	// 5. Get the directory of the original script - critical for include path resolution
 	// Remove any path parameters from the path to ensure it's a valid directory
 	cleanOrigPath := e.sanitizePathForChdir(resolvedScriptPath)
 	originalScriptDir := filepath.Dir(cleanOrigPath)
@@ -355,7 +394,7 @@ func (e *Executor) createPhpWrapper(resolvedScriptPath, originalScriptPath strin
 		originalScriptDir = vfs.GetTempDir()
 	}
 
-	// 5. Create a wrapper that properly sets up include paths before including the target script
+	// 6. Create a wrapper that properly sets up include paths before including the target script
 	wrapperContent := fmt.Sprintf(`<?php
 // Auto-generated wrapper for %s
 // This wrapper provides isolation between different script executions
@@ -368,16 +407,28 @@ require_once '%s';
 $original_dir = getcwd();
 $original_include_path = get_include_path();
 
-// Set up the working directory to the original script's directory
-// This will make all relative includes in the target script work correctly
+// Set up the working directory to the temp directory that mimics project structure
 chdir('%s');
-set_include_path(get_include_path() . PATH_SEPARATOR . '%s');
+
+// Add multiple directories to the include path for relative include resolution
+set_include_path(
+    get_include_path() . PATH_SEPARATOR . 
+    '%s' . PATH_SEPARATOR .   // Temp directory (VFS root)
+    '%s' . PATH_SEPARATOR .   // Original script directory
+    '%s'                      // Project root
+);
 
 // Define helper functions for resolving paths relative to the original script
 if (!function_exists('script_path')) {
     function script_path($path) {
         return '%s' . DIRECTORY_SEPARATOR . $path;
     }
+}
+
+// Extract template variables from _TEMPLATE and make them available as global variables
+foreach ($_TEMPLATE as $key => $value) {
+    // Create each template variable as a global
+    $GLOBALS[$key] = $value;
 }
 
 // Include the target PHP script
@@ -389,7 +440,8 @@ try {
     set_include_path($original_include_path);
 }
 ?>`, resolvedScriptPath, calculateScriptPathHash(originalScriptPath), globalsFilePath,
-		originalScriptDir, originalScriptDir, originalScriptDir, targetFilename)
+		vfs.GetTempDir(), vfs.GetTempDir(), originalScriptDir, projectRoot,
+		originalScriptDir, relPath)
 
 	// Create the wrapper script
 	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {

@@ -79,6 +79,20 @@ unset($_SERVER['_JSON']); // Clean up server var
 $_PATH_SEGMENTS = json_decode($_SERVER['_PATH_SEGMENTS'] ?? '[]', true);
 unset($_SERVER['_PATH_SEGMENTS']); // Clean up server var
 
+// Extract PHP_VAR_* variables and create them as global variables
+foreach ($_SERVER as $key => $value) {
+    if (strpos($key, 'PHP_VAR_') === 0) {
+        $var_name = substr($key, 8); // Remove PHP_VAR_ prefix
+        $var_value = json_decode($value, true);
+        
+        // Create the variable in the global scope
+        $GLOBALS[$var_name] = $var_value;
+        
+        // Remove from $_SERVER to avoid namespace pollution
+        unset($_SERVER[$key]);
+    }
+}
+
 //=====================================
 // HELPER FUNCTIONS
 //=====================================
@@ -161,13 +175,6 @@ function json_body($key = null, $default = null) {
 function template_var($key, $default = null) {
     global $_TEMPLATE;
     return $_TEMPLATE[$key] ?? $default;
-}
-
-// Clean up any PHP_VAR_* variables to avoid namespace pollution
-foreach ($_SERVER as $key => $value) {
-    if (strpos($key, 'PHP_VAR_') === 0) {
-        unset($_SERVER[$key]);
-    }
 }
 `
 }
