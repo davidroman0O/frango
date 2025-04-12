@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 
@@ -81,9 +80,9 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 		t.Fatalf("Failed to write PHP file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := logWriter(t)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS with a logger that writes to the test log
+	vfsLogger := logWriter(t)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -97,7 +96,7 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 
 	// Create executor
 	exec := NewExecutor(Config{
-		Logger:          logger,
+		Logger:          vfsLogger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
 	}, v)
@@ -325,9 +324,9 @@ echo json_encode($_SERVER, JSON_PRETTY_PRINT);
 		t.Fatalf("Failed to write PHP file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := logWriter(t)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS with a logger that writes to the test log
+	vfsLogger := logWriter(t)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -341,7 +340,7 @@ echo json_encode($_SERVER, JSON_PRETTY_PRINT);
 
 	// Create executor
 	exec := NewExecutor(Config{
-		Logger:          logger,
+		Logger:          vfsLogger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
 	}, v)

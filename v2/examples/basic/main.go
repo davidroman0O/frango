@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/davidroman0O/frango/v2"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 )
 
 //go:embed index.php
@@ -20,7 +21,16 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// mux.HandleFunc("/", php
+	vfs, err := vfs.NewVFS()
+	if err != nil {
+		log.Fatalf("No VFS %s", err)
+	}
+
+	if err := vfs.AddEmbeddedFile(indexPHP, "index.php", "index.php"); err != nil {
+		log.Fatalf("Failed to add embedded file: %v", err)
+	}
+
+	mux.Handle("/", php.ForVFS(vfs, "index.php"))
 
 	http.ListenAndServe(":8080", mux)
 }

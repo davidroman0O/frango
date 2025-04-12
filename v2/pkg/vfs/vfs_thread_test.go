@@ -35,7 +35,11 @@ func TestVFS_ThreadSafety(t *testing.T) {
 	logger := log.New(os.Stdout, "THREAD TEST: ", log.LstdFlags)
 
 	// Create a VFS
-	vfs, err := NewVFS(tempDir, logger, false)
+	vfs, err := NewVFSWithConfig(VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: false,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}

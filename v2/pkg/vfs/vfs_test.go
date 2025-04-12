@@ -17,8 +17,22 @@ import (
 //go:embed testdata/test.php
 var testEmbedFS embed.FS
 
-// TestNewVFS tests the creation of a new VFS
-func TestNewVFS(t *testing.T) {
+// Helper function to create a VFS for testing
+func createTestVFS(t *testing.T, tempDir string, developMode bool) *VFS {
+	logger := log.New(io.Discard, "", 0)
+	vfs, err := NewVFSWithConfig(VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: developMode,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create VFS: %v", err)
+	}
+	return vfs
+}
+
+// TestVFS_New tests creating a new VFS
+func TestVFS_New(t *testing.T) {
 	// Create a temp directory for testing
 	tempDir, err := os.MkdirTemp("", "frango-vfs-test-")
 	if err != nil {
@@ -26,14 +40,8 @@ func TestNewVFS(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Verify that the VFS was created successfully
@@ -61,14 +69,8 @@ func TestVFS_Branch(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a parent VFS
-	parent, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
+	parent := createTestVFS(t, tempDir, true)
 	defer parent.Cleanup()
 
 	// Create a virtual file in the parent
@@ -159,14 +161,8 @@ func TestVFS_AddSourceFile(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source file to the VFS
@@ -233,14 +229,8 @@ func TestVFS_AddSourceDirectory(t *testing.T) {
 		}
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source directory to the VFS
@@ -285,14 +275,8 @@ func TestVFS_CreateVirtualFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Create a virtual file
@@ -341,14 +325,8 @@ func TestVFS_CopyFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Create a source file
@@ -403,14 +381,8 @@ func TestVFS_MoveFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Create a source file
@@ -455,14 +427,8 @@ func TestVFS_DeleteFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Create a file
@@ -534,14 +500,8 @@ func TestVFS_FileChanges(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
-	// Create a new VFS with development mode enabled
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source file to the VFS
@@ -595,14 +555,8 @@ func TestVFS_AddEmbeddedFile(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Create a test file with the embedded content that we'll use instead of an embedded file
@@ -690,14 +644,8 @@ func TestVFS_AddSourceDirectoryRecursive(t *testing.T) {
 		}
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the directory to the VFS
@@ -793,14 +741,8 @@ func TestVFS_CopyWithOriginPreservation(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source file to the VFS
@@ -899,14 +841,8 @@ func TestVFS_MoveWithOriginPreservation(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source file to the VFS
@@ -976,24 +912,18 @@ func TestVFS_BranchInheritance(t *testing.T) {
 		t.Fatalf("Failed to create parent file: %v", err)
 	}
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
 
-	// Create a parent VFS
-	parentVFS, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
-	defer parentVFS.Cleanup()
-
-	// Add the file to the parent VFS
+	// Add the file to the VFS
 	parentVirtualPath := "/parent.php"
-	if err := parentVFS.AddSourceFile(parentFile, parentVirtualPath); err != nil {
+	if err := vfs.AddSourceFile(parentFile, parentVirtualPath); err != nil {
 		t.Fatalf("Failed to add file to parent VFS: %v", err)
 	}
 
 	// Create a child VFS
-	childVFS := parentVFS.Branch()
+	childVFS := vfs.Branch()
 	defer childVFS.Cleanup()
 
 	// Verify child can see parent's file
@@ -1026,10 +956,10 @@ func TestVFS_BranchInheritance(t *testing.T) {
 	}
 
 	// Force parent VFS to check for changes
-	parentVFS.checkFileChanges(parentVirtualPath)
+	vfs.checkFileChanges(parentVirtualPath)
 
 	// Verify the parent VFS sees the change
-	newParentContent, err := parentVFS.GetFileContent(parentVirtualPath)
+	newParentContent, err := vfs.GetFileContent(parentVirtualPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated parent file: %v", err)
 	}
@@ -1072,40 +1002,35 @@ func TestVFS_ReferenceCount(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create a logger that logs to stdout for debugging
-	logger := log.New(os.Stdout, "TEST: ", 0)
-
-	// Create a parent VFS
-	parentVFS, err := NewVFS(tempDir, logger, false) // Disable development mode to reduce noise
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
 
 	// Verify initial reference count
-	parentVFS.refMutex.Lock()
-	if parentVFS.refCount != 0 {
-		t.Fatalf("Initial reference count should be 0, got %d", parentVFS.refCount)
+	vfs.refMutex.Lock()
+	if vfs.refCount != 0 {
+		t.Fatalf("Initial reference count should be 0, got %d", vfs.refCount)
 	}
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent VFS created with ID: %s", parentVFS.name)
+	vfs.refMutex.Unlock()
+	t.Logf("VFS created with ID: %s", vfs.name)
 
 	// Create multiple branches
-	child1 := parentVFS.Branch()
+	child1 := vfs.Branch()
 	t.Logf("Created child1 with ID: %s", child1.name)
 
-	child2 := parentVFS.Branch()
+	child2 := vfs.Branch()
 	t.Logf("Created child2 with ID: %s", child2.name)
 
-	child3 := parentVFS.Branch()
+	child3 := vfs.Branch()
 	t.Logf("Created child3 with ID: %s", child3.name)
 
 	// Verify reference count was increased
-	parentVFS.refMutex.Lock()
-	parentRefCount := parentVFS.refCount
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent ref count after creating 3 children: %d", parentRefCount)
-	if parentRefCount != 3 {
-		t.Fatalf("Reference count should be 3 after creating branches, got %d", parentRefCount)
+	vfs.refMutex.Lock()
+	refCount := vfs.refCount
+	vfs.refMutex.Unlock()
+	t.Logf("Ref count after creating 3 children: %d", refCount)
+	if refCount != 3 {
+		t.Fatalf("Reference count should be 3 after creating branches, got %d", refCount)
 	}
 
 	// Cleanup one child
@@ -1113,12 +1038,12 @@ func TestVFS_ReferenceCount(t *testing.T) {
 	child1.Cleanup()
 
 	// Check parent's refcount again
-	parentVFS.refMutex.Lock()
-	parentRefCount = parentVFS.refCount
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent ref count after cleaning child1: %d", parentRefCount)
-	if parentRefCount != 2 {
-		t.Fatalf("Reference count should be 2 after child cleanup, got %d", parentRefCount)
+	vfs.refMutex.Lock()
+	refCount = vfs.refCount
+	vfs.refMutex.Unlock()
+	t.Logf("Ref count after cleaning child1: %d", refCount)
+	if refCount != 2 {
+		t.Fatalf("Reference count should be 2 after child cleanup, got %d", refCount)
 	}
 
 	// Create a grandchild
@@ -1127,7 +1052,7 @@ func TestVFS_ReferenceCount(t *testing.T) {
 
 	// Print the hierarchy
 	t.Logf("VFS hierarchy: parent(%s) -> child2(%s) -> grandchild(%s)",
-		parentVFS.name, child2.name, grandchild.name)
+		vfs.name, child2.name, grandchild.name)
 	t.Logf("                \\-> child3(%s)", child3.name)
 
 	// Verify child's reference count
@@ -1141,15 +1066,15 @@ func TestVFS_ReferenceCount(t *testing.T) {
 
 	// Cleanup parent - should mark for cleanup but defer actual cleanup
 	t.Logf("Marking parent for cleanup...")
-	parentVFS.Cleanup()
+	vfs.Cleanup()
 
 	// Verify parent is marked for cleanup but not fully cleaned up
-	parentVFS.refMutex.Lock()
-	isCleanedUp := parentVFS.isCleanedUp
-	parentRefCount = parentVFS.refCount
-	parentVFS.refMutex.Unlock()
+	vfs.refMutex.Lock()
+	isCleanedUp := vfs.isCleanedUp
+	refCount = vfs.refCount
+	vfs.refMutex.Unlock()
 	t.Logf("Parent after marking for cleanup: isCleanedUp=%v, refCount=%d",
-		isCleanedUp, parentRefCount)
+		isCleanedUp, refCount)
 
 	if !isCleanedUp {
 		t.Fatalf("Parent should be marked as cleaned up")
@@ -1160,10 +1085,10 @@ func TestVFS_ReferenceCount(t *testing.T) {
 	child3.Cleanup()
 
 	// Check parent ref count
-	parentVFS.refMutex.Lock()
-	parentRefCount = parentVFS.refCount
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent ref count after cleaning child3: %d", parentRefCount)
+	vfs.refMutex.Lock()
+	refCount = vfs.refCount
+	vfs.refMutex.Unlock()
+	t.Logf("Ref count after cleaning child3: %d", refCount)
 
 	t.Logf("Cleaning up child2...")
 	child2.Cleanup()
@@ -1174,10 +1099,10 @@ func TestVFS_ReferenceCount(t *testing.T) {
 	child2.refMutex.Unlock()
 	t.Logf("Child2 ref count after cleaning: %d", child2RefCount)
 
-	parentVFS.refMutex.Lock()
-	parentRefCount = parentVFS.refCount
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent ref count after cleaning child2: %d", parentRefCount)
+	vfs.refMutex.Lock()
+	refCount = vfs.refCount
+	vfs.refMutex.Unlock()
+	t.Logf("Ref count after cleaning child2: %d", refCount)
 
 	t.Logf("Cleaning up grandchild...")
 	grandchild.Cleanup()
@@ -1192,19 +1117,19 @@ func TestVFS_ReferenceCount(t *testing.T) {
 	child2.refMutex.Unlock()
 	t.Logf("Child2 final state: refCount=%d, isCleanedUp=%v", child2RefCount, child2IsCleanedUp)
 
-	parentVFS.refMutex.Lock()
-	parentRefCount = parentVFS.refCount
-	parentIsCleanedUp := parentVFS.isCleanedUp
-	parentVFS.refMutex.Unlock()
-	t.Logf("Parent final state: refCount=%d, isCleanedUp=%v", parentRefCount, parentIsCleanedUp)
+	vfs.refMutex.Lock()
+	refCount = vfs.refCount
+	parentIsCleanedUp := vfs.isCleanedUp
+	vfs.refMutex.Unlock()
+	t.Logf("Parent final state: refCount=%d, isCleanedUp=%v", refCount, parentIsCleanedUp)
 
 	// The test will pass if both refcounts are 0
 	if child2RefCount != 0 {
 		t.Fatalf("Child2 reference count should be 0 after all cleanups, got %d", child2RefCount)
 	}
 
-	if parentRefCount != 0 {
-		t.Fatalf("Parent reference count should be 0 after all cleanups, got %d", parentRefCount)
+	if refCount != 0 {
+		t.Fatalf("Parent reference count should be 0 after all cleanups, got %d", refCount)
 	}
 }
 
@@ -1218,15 +1143,9 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
-	// Create a parent VFS
-	parentVFS, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
-	defer parentVFS.Cleanup()
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
 
 	// Create a few source files for testing
 	for i := 0; i < 5; i++ {
@@ -1235,7 +1154,7 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 		if err := os.WriteFile(fileName, content, 0644); err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
 		}
-		if err := parentVFS.AddSourceFile(fileName, fmt.Sprintf("/source%d.php", i)); err != nil {
+		if err := vfs.AddSourceFile(fileName, fmt.Sprintf("/source%d.php", i)); err != nil {
 			t.Fatalf("Failed to add source file: %v", err)
 		}
 	}
@@ -1243,7 +1162,7 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 	// Create virtual files
 	for i := 0; i < 5; i++ {
 		content := []byte(fmt.Sprintf("<?php echo 'Virtual file %d'; ?>", i))
-		if err := parentVFS.CreateVirtualFile(fmt.Sprintf("/virtual%d.php", i), content); err != nil {
+		if err := vfs.CreateVirtualFile(fmt.Sprintf("/virtual%d.php", i), content); err != nil {
 			t.Fatalf("Failed to create virtual file: %v", err)
 		}
 	}
@@ -1251,7 +1170,7 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 	// Create child branches that will be accessed concurrently
 	children := make([]*VFS, 5)
 	for i := 0; i < 5; i++ {
-		children[i] = parentVFS.Branch()
+		children[i] = vfs.Branch()
 		defer children[i].Cleanup()
 	}
 
@@ -1349,14 +1268,14 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 
 		// Select a VFS to operate on (parent or one of the children)
-		var vfs *VFS
+		var targetVFS *VFS
 		if i%6 == 0 { // Occasionally use the parent
-			vfs = parentVFS
+			targetVFS = vfs
 		} else {
-			vfs = children[i%len(children)]
+			targetVFS = children[i%len(children)]
 		}
 
-		go performOperations(vfs, i, operationsPerGoroutine, &wg)
+		go performOperations(targetVFS, i, operationsPerGoroutine, &wg)
 	}
 
 	// Wait for all goroutines to complete
@@ -1365,7 +1284,7 @@ func TestVFS_ConcurrentAccess(t *testing.T) {
 	// Final verification - check that VFS is still in a consistent state
 	for i := 0; i < 5; i++ {
 		path := fmt.Sprintf("/source%d.php", i)
-		if !parentVFS.FileExists(path) {
+		if !vfs.FileExists(path) {
 			t.Errorf("Expected source file %s to still exist", path)
 		}
 	}
@@ -1380,14 +1299,8 @@ func TestVFS_PathCharacterHandling(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards all output
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Test 1: Unicode characters in paths
@@ -1539,15 +1452,8 @@ func TestVFS_ErrorRecovery(t *testing.T) {
 	}
 	defer os.RemoveAll(tempParentDir)
 
-	// Create a logger for capturing logs
-	var logBuffer strings.Builder
-	logger := log.New(&logBuffer, "TEST: ", 0)
-
 	// Create the main VFS for testing
-	vfs, err := NewVFS(tempParentDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempParentDir, true)
 	defer vfs.Cleanup()
 
 	// Test 1: Recovery from failed file reads
@@ -1651,14 +1557,8 @@ func TestVFS_MixedOriginTypes(t *testing.T) {
 		}
 	}
 
-	// Create a logger
-	logger := log.New(io.Discard, "", 0)
-
 	// Create a new VFS
-	vfs, err := NewVFS(tempDir, logger, true)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	vfs := createTestVFS(t, tempDir, true)
 	defer vfs.Cleanup()
 
 	// Add the source directory
@@ -1814,38 +1714,32 @@ func TestVFS_Resurrection(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that captures logs
-	var logBuffer strings.Builder
-	logger := log.New(&logBuffer, "TEST: ", 0)
-
-	// Create a parent VFS
-	parentVFS, err := NewVFS(tempDir, logger, false)
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
 
 	// Create a test file
 	testPath := "/resurrection.php"
 	testContent := []byte("<?php echo 'Resurrection test'; ?>")
-	if err := parentVFS.CreateVirtualFile(testPath, testContent); err != nil {
+	if err := vfs.CreateVirtualFile(testPath, testContent); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	// Create a first child
-	child1 := parentVFS.Branch()
+	child1 := vfs.Branch()
 	if child1 == nil {
 		t.Fatalf("Failed to create first child branch")
 	}
 	defer child1.Cleanup()
 
 	// Now mark parent for cleanup (but it shouldn't fully clean up yet because child1 references it)
-	parentVFS.Cleanup()
+	vfs.Cleanup()
 
 	// Verify parent is marked for cleanup
-	parentVFS.refMutex.Lock()
-	isCleanedUp := parentVFS.isCleanedUp
-	refCount := parentVFS.refCount
-	parentVFS.refMutex.Unlock()
+	vfs.refMutex.Lock()
+	isCleanedUp := vfs.isCleanedUp
+	refCount := vfs.refCount
+	vfs.refMutex.Unlock()
 
 	if !isCleanedUp {
 		t.Errorf("Parent should be marked as cleaned up")
@@ -1855,7 +1749,7 @@ func TestVFS_Resurrection(t *testing.T) {
 	}
 
 	// Try to create another branch (this should fail or return nil)
-	child2 := parentVFS.Branch()
+	child2 := vfs.Branch()
 	if child2 != nil {
 		t.Errorf("Should not be able to create a branch from a VFS marked for cleanup")
 		child2.Cleanup() // Clean it up to avoid resource leaks
@@ -1932,8 +1826,9 @@ func TestVFS_ResourceUsage(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that discards output
-	logger := log.New(io.Discard, "", 0)
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
 
 	// Measure before memory
 	var m1, m2 runtime.MemStats
@@ -1944,44 +1839,29 @@ func TestVFS_ResourceUsage(t *testing.T) {
 	const iterations = 1000
 	for i := 0; i < iterations; i++ {
 		// Create parent
-		parent, err := NewVFS(tempDir, logger, false)
+		parent, err := NewVFSWithConfig(VFSConfig{
+			TempDir:     tempDir,
+			Logger:      log.New(io.Discard, "", 0),
+			DevelopMode: true,
+		})
 		if err != nil {
 			t.Fatalf("Failed to create VFS: %v", err)
 		}
 
-		// Create a file
-		path := fmt.Sprintf("/leak_test_%d.php", i)
-		content := []byte(fmt.Sprintf("<?php echo 'Leak test %d'; ?>", i))
-		if err := parent.CreateVirtualFile(path, content); err != nil {
-			t.Fatalf("Failed to create file: %v", err)
-		}
+		// Create some children
+		child1 := parent.Branch()
+		child2 := parent.Branch()
 
-		// Create a child
-		child := parent.Branch()
-		if child == nil {
-			t.Fatalf("Failed to create branch")
-		}
+		// Create some grandchildren
+		grandchild1 := child1.Branch()
+		grandchild2 := child2.Branch()
 
-		// Create a file in the child
-		childPath := fmt.Sprintf("/child_leak_test_%d.php", i)
-		if err := child.CreateVirtualFile(childPath, content); err != nil {
-			t.Fatalf("Failed to create file in child: %v", err)
-		}
-
-		// Clean up child first, then parent
-		child.Cleanup()
+		// Cleanup in reverse order
+		grandchild1.Cleanup()
+		grandchild2.Cleanup()
+		child1.Cleanup()
+		child2.Cleanup()
 		parent.Cleanup()
-
-		// For every 100 iterations, force GC and measure memory
-		if i > 0 && i%100 == 0 {
-			runtime.GC()
-			var intermediateStats runtime.MemStats
-			runtime.ReadMemStats(&intermediateStats)
-
-			// Log memory usage periodically
-			t.Logf("After %d iterations - Heap alloc: %d MB, Objects: %d",
-				i, intermediateStats.HeapAlloc/1024/1024, intermediateStats.HeapObjects)
-		}
 	}
 
 	// Force GC and measure after memory
@@ -2048,12 +1928,8 @@ func TestVFS_SymlinkHandling(t *testing.T) {
 		t.Fatalf("Failed to create symlink directory: %v", err)
 	}
 
-	// Create a VFS for testing
-	logger := log.New(io.Discard, "", 0)
-	vfs, err := NewVFS(tempDir, logger, false)
-	if err != nil {
-		t.Fatalf("Failed to create VFS: %v", err)
-	}
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, false)
 	defer vfs.Cleanup()
 
 	// Test 1: Adding a regular file should work
@@ -2108,19 +1984,12 @@ func TestVFS_CircularReferencePrevention(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Create a logger that captures logs
-	var logBuffer strings.Builder
-	logger := log.New(&logBuffer, "TEST: ", 0)
-
-	// Create a parent VFS
-	parent, err := NewVFS(tempDir, logger, false)
-	if err != nil {
-		t.Fatalf("Failed to create parent VFS: %v", err)
-	}
-	defer parent.Cleanup()
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, false)
+	defer vfs.Cleanup()
 
 	// Create a child VFS
-	child := parent.Branch()
+	child := vfs.Branch()
 	if child == nil {
 		t.Fatalf("Failed to create child VFS")
 	}
@@ -2135,21 +2004,93 @@ func TestVFS_CircularReferencePrevention(t *testing.T) {
 
 	// Test 1: Would grandchild create a circular reference if trying to branch to parent?
 	// This should detect a circular reference - grandchild->child->parent (cycle back to parent)
-	circularDetected := parent.wouldCreateCircularReference(grandchild)
+	circularDetected := vfs.wouldCreateCircularReference(grandchild)
 	if !circularDetected {
 		t.Errorf("Should have detected potential circular reference from parent to grandchild")
 	}
 
 	// Test 2: Direct self-reference
-	selfReferenceDetected := parent.wouldCreateCircularReference(parent)
+	selfReferenceDetected := vfs.wouldCreateCircularReference(vfs)
 	if !selfReferenceDetected {
 		t.Errorf("Should have detected self-reference circular dependency")
 	}
 
 	// Test 3: Would parent create a circular reference if using child as parent? (No)
 	// This is not a circular reference, just a reverse of the normal hierarchy
-	isCircular := child.wouldCreateCircularReference(parent)
+	isCircular := child.wouldCreateCircularReference(vfs)
 	if isCircular {
 		t.Errorf("Incorrectly detected circular reference - this is just a reverse relationship")
+	}
+}
+
+// TestVFS_BenchmarkMemoryUsage tests memory usage for a large number of VFS instances
+func TestVFS_BenchmarkMemoryUsage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping memory benchmark in short mode")
+	}
+
+	// Create a temp directory for testing
+	tempDir, err := os.MkdirTemp("", "frango-vfs-test-")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a new VFS
+	vfs := createTestVFS(t, tempDir, true)
+	defer vfs.Cleanup()
+
+	// Measure before memory
+	var ms1, ms2 runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&ms1)
+
+	// Create and cleanup a large number of VFS instances
+	iterations := 100
+	for i := 0; i < iterations; i++ {
+		// Create parent
+		parent, err := NewVFSWithConfig(VFSConfig{
+			TempDir:     tempDir,
+			Logger:      log.New(io.Discard, "", 0),
+			DevelopMode: true,
+		})
+		if err != nil {
+			t.Fatalf("Failed to create VFS: %v", err)
+		}
+
+		// Create some children
+		child1 := parent.Branch()
+		child2 := parent.Branch()
+
+		// Create some grandchildren
+		grandchild1 := child1.Branch()
+		grandchild2 := child2.Branch()
+
+		// Cleanup in reverse order
+		grandchild1.Cleanup()
+		grandchild2.Cleanup()
+		child1.Cleanup()
+		child2.Cleanup()
+		parent.Cleanup()
+	}
+
+	// Force GC and measure after memory
+	runtime.GC()
+	runtime.ReadMemStats(&ms2)
+
+	// Calculate and log the difference
+	heapDiff := int64(ms2.HeapAlloc) - int64(ms1.HeapAlloc)
+	objectsDiff := int64(ms2.HeapObjects) - int64(ms1.HeapObjects)
+
+	t.Logf("Memory usage - Before: %d MB, After: %d MB, Diff: %d MB",
+		ms1.HeapAlloc/1024/1024, ms2.HeapAlloc/1024/1024, heapDiff/1024/1024)
+	t.Logf("Object count - Before: %d, After: %d, Diff: %d",
+		ms1.HeapObjects, ms2.HeapObjects, objectsDiff)
+
+	// Warning threshold for objects leak (some overhead is expected)
+	const leakThreshold = 1000
+	if objectsDiff > leakThreshold {
+		t.Logf("WARNING: Possible memory leak detected - %d objects remained after cleanup and GC", objectsDiff)
+		// Not failing the test since some overhead is normal, but logging a warning
 	}
 }

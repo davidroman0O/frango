@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 
@@ -45,9 +44,9 @@ echo "Hello, Executor!";
 		t.Fatalf("Failed to create PHP file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS
+	vfsLogger := log.New(os.Stdout, "[vfs-test] ", log.LstdFlags)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -61,7 +60,7 @@ echo "Hello, Executor!";
 
 	// Create executor
 	exec := NewExecutor(Config{
-		Logger:          logger,
+		Logger:          vfsLogger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
 	}, v)
@@ -164,9 +163,9 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 		t.Fatalf("Failed to create subcategory file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS
+	vfsLogger := log.New(os.Stdout, "[vfs-test] ", log.LstdFlags)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -179,7 +178,7 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 
 	// Create executor
 	exec := NewExecutor(Config{
-		Logger:          logger,
+		Logger:          vfsLogger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
 	}, v)
@@ -317,9 +316,9 @@ echo json_encode($errorData);
 		t.Fatalf("Failed to create PHP file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS
+	vfsLogger := log.New(os.Stdout, "[vfs-test] ", log.LstdFlags)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -333,7 +332,7 @@ echo json_encode($errorData);
 	// Test syntax error without custom error handler
 	t.Run("Syntax error without custom handler", func(t *testing.T) {
 		exec := NewExecutor(Config{
-			Logger:          logger,
+			Logger:          vfsLogger,
 			DevelopmentMode: true,
 			DisplayErrors:   true,
 		}, v)
@@ -352,7 +351,7 @@ echo json_encode($errorData);
 	// Test runtime error without custom error handler
 	t.Run("Runtime error without custom handler", func(t *testing.T) {
 		exec := NewExecutor(Config{
-			Logger:          logger,
+			Logger:          vfsLogger,
 			DevelopmentMode: true,
 			DisplayErrors:   true,
 		}, v)
@@ -371,7 +370,7 @@ echo json_encode($errorData);
 	// Test runtime error with custom error handler
 	t.Run("Runtime error with custom handler", func(t *testing.T) {
 		exec := NewExecutor(Config{
-			Logger:           logger,
+			Logger:           vfsLogger,
 			DevelopmentMode:  true,
 			DisplayErrors:    true,
 			ErrorHandlerPath: "/error_handler.php",
@@ -440,9 +439,9 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 		t.Fatalf("Failed to create PHP file: %v", err)
 	}
 
-	// Setup VFS and Executor
-	logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
-	v, err := vfs.NewVFS(tempDir, logger, true)
+	// Create a VFS
+	vfsLogger := log.New(os.Stdout, "[vfs-test] ", log.LstdFlags)
+	v, err := createTestVFS(tempDir, vfsLogger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}
@@ -456,7 +455,7 @@ echo json_encode($response, JSON_PRETTY_PRINT);
 
 	// Create executor
 	exec := NewExecutor(Config{
-		Logger:          logger,
+		Logger:          vfsLogger,
 		DevelopmentMode: true,
 		DisplayErrors:   true,
 	}, v)

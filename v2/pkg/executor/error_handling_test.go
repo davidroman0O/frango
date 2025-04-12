@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/davidroman0O/frango/v2/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 
@@ -101,7 +100,7 @@ func TestExecutorErrorHandling(t *testing.T) {
 			logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
 
 			// Create a VFS with development mode disabled to avoid race conditions
-			v, err := vfs.NewVFS(tempDir, logger, false)
+			v, err := createTestVFS(tempDir, logger, false)
 			if err != nil {
 				t.Fatalf("Failed to create VFS: %v", err)
 			}
@@ -190,7 +189,7 @@ func TestCustomErrorHandler(t *testing.T) {
 	logger := log.New(os.Stdout, "[test] ", log.LstdFlags)
 
 	// Create a VFS with development mode disabled to avoid race conditions
-	v, err := vfs.NewVFS(tempDir, logger, false)
+	v, err := createTestVFS(tempDir, logger, false)
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}

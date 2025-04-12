@@ -121,15 +121,27 @@ type VFS struct {
 	contentCache map[string][]byte // Path -> content cache (for frequently accessed files)
 }
 
-// VFSConfig holds configuration options for creating a new VFS
+// VFSConfig provides configuration options for creating a new VFS instance
 type VFSConfig struct {
-	TempDir         string          // Temporary directory for VFS files
-	Logger          *log.Logger     // Logger for VFS operations
-	DevelopMode     bool            // Whether development mode is enabled
-	GlobalsProvider GlobalsProvider // Provider for PHP globals script
+	// TempDir is the directory where temporary files will be stored
+	// If empty, os.TempDir() will be used
+	TempDir string
+
+	// Logger for VFS operations
+	Logger *log.Logger
+
+	// DevelopMode enables development features like auto-reloading
+	DevelopMode bool
+
+	// GlobalsProvider provides global PHP variables
+	GlobalsProvider GlobalsProvider
+
+	// EnableAutoReload determines whether files should be automatically reloaded when changes are detected
+	// Only has effect when DevelopMode is true
+	EnableAutoReload bool
 
 	// Auto-reload options
-	EnableAutoReload  bool   // Whether to enable auto-reload functionality
-	AutoReloadScript  string // Custom JavaScript to inject for auto-reload (if empty, default is used)
-	AutoReloadTrigger string // Custom reload trigger mechanism: "websocket", "sse", "polling" (default is "sse")
+	AutoReloadInterval time.Duration // How often to check for file changes
+	AutoReloadScript   string        // Custom JavaScript to inject for auto-reload
+	AutoReloadTrigger  string        // Reload trigger mechanism: "websocket", "sse", "polling"
 }

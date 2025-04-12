@@ -26,7 +26,11 @@ func TestVFS_LogicalPathTracking(t *testing.T) {
 	logger := log.New(os.Stderr, "VFS-TEST: ", log.LstdFlags)
 
 	// Create VFS
-	vfs, err := NewVFS(tempDir, logger, false)
+	vfs, err := NewVFSWithConfig(VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: false,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create VFS: %v", err)
 	}

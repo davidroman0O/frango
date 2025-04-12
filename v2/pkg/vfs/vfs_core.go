@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,75 +12,71 @@ import (
 	"github.com/davidroman0O/frango/v2/internal/utils"
 )
 
-// NewVFS creates a new virtual filesystem
-func NewVFS(tempDir string, logger *log.Logger, developMode bool) (*VFS, error) {
+// NewVFS creates a new VFS instance with default configuration
+func NewVFS() (*VFS, error) {
 	return NewVFSWithConfig(VFSConfig{
-		TempDir:         tempDir,
-		Logger:          logger,
-		DevelopMode:     developMode,
-		GlobalsProvider: &DefaultGlobalsProvider{},
+		TempDir: os.TempDir(),
 	})
 }
 
-// NewVFSWithConfig creates a new virtual filesystem with the specified configuration
+// NewVFSWithConfig creates a new VFS instance with the given configuration
 func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
-	// Create unique ID for this VFS
-	id := utils.GenerateUniqueID()
-
-	// Create base temp directory for this VFS
-	vfsTempDir := filepath.Join(config.TempDir, "vfs-"+id)
-	if err := os.MkdirAll(vfsTempDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create VFS temp directory: %w", err)
+	if config.TempDir == "" {
+		config.TempDir = os.TempDir()
 	}
 
-	// Set default globals provider if not specified
-	if config.GlobalsProvider == nil {
-		config.GlobalsProvider = &DefaultGlobalsProvider{
-			Script: "<?php /* Default PHP globals script */ ?>",
-			Path:   "/_frango_php_globals.php",
+	if config.Logger == nil {
+		config.Logger = log.New(io.Discard, "", 0)
+	}
+
+	// Create unique ID for this VFS instance
+	vfsID := utils.GenerateUniqueID()
+	vfsDir := filepath.Join(config.TempDir, "vfs-"+vfsID)
+
+	// Create the VFS structure
+	v := &VFS{
+		name:           vfsID,
+		sourceMappings: make(map[string]string),
+		embedMappings:  make(map[string]string),
+		virtualFiles:   make(map[string][]byte),
+		fileOrigins:    make(map[string]FileOrigin),
+		fileHashes:     make(map[string]FileHash),
+		tempDir:        vfsDir,
+		logicalPaths:   make(map[string]string),
+		watchStop:      make(chan bool),
+		logger:         config.Logger,
+		changedFiles:   make(map[string]bool),
+		inheritedPaths: make(map[string]bool),
+		developMode:    config.DevelopMode,
+		globalLibs:     make(map[string]string),
+		changeHandlers: []FileChangeHandler{},
+		pathCache:      make(map[string]string),
+		contentCache:   make(map[string][]byte),
+	}
+
+	// Set globals provider (use default if none specified)
+	if config.GlobalsProvider != nil {
+		v.globalsProvider = config.GlobalsProvider
+	} else {
+		v.globalsProvider = &DefaultGlobalsProvider{
+			Script: "<?php\n// Default globals script\n",
+			Path:   "/globals.php",
 		}
 	}
 
-	v := &VFS{
-		name:            id,
-		sourceMappings:  make(map[string]string),
-		embedMappings:   make(map[string]string),
-		virtualFiles:    make(map[string][]byte),
-		fileOrigins:     make(map[string]FileOrigin),
-		fileHashes:      make(map[string]FileHash),
-		tempDir:         vfsTempDir,
-		watchStop:       make(chan bool),
-		logger:          config.Logger,
-		changedFiles:    make(map[string]bool),
-		inheritedPaths:  make(map[string]bool),
-		developMode:     config.DevelopMode,
-		globalLibs:      make(map[string]string),
-		refCount:        0, // Initialize reference count to 0
-		isCleanedUp:     false,
-		globalsProvider: config.GlobalsProvider,
-		logicalPaths:    make(map[string]string), // Initialize logical paths map
-		changeHandlers:  []FileChangeHandler{},   // Initialize empty handlers slice
-
-		// Initialize new cache maps
-		pathCache:    make(map[string]string),
-		contentCache: make(map[string][]byte),
+	// Create temp directory
+	if err := os.MkdirAll(vfsDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create VFS directory: %w", err)
 	}
 
 	// Initialize with PHP globals
 	if err := v.initializeGlobals(); err != nil {
-		// Clean up on failure
-		os.RemoveAll(vfsTempDir)
-		return nil, err
+		v.logger.Printf("Warning: Failed to initialize globals: %v", err)
 	}
 
-	// Start file watching if in development mode
-	if config.DevelopMode {
+	// Start file watching if in develop mode
+	if v.developMode && config.EnableAutoReload {
 		v.startWatching()
-
-		// If auto-reload is enabled, set it up
-		if config.EnableAutoReload {
-			v.EnableAutoReload(config)
-		}
 	}
 
 	return v, nil

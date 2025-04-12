@@ -132,7 +132,11 @@ func (m *Middleware) Shutdown() {
 
 // NewVFS creates a new VFS instance
 func NewVFS(tempDir string, logger *log.Logger, developMode bool) (*vfs.VFS, error) {
-	return vfs.NewVFS(tempDir, logger, developMode)
+	return vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: developMode,
+	})
 }
 
 // NewVFS creates a new virtual filesystem instance for the middleware

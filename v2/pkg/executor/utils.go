@@ -1,11 +1,14 @@
 package executor
 
 import (
+	"encoding/base64"
+	"log"
 	"net"
 	"sort"
 	"strings"
 
 	"github.com/davidroman0O/frango/v2/pkg/php"
+	"github.com/davidroman0O/frango/v2/pkg/vfs"
 )
 
 // calculateScriptPathHash generates a hash for a given script path.
@@ -55,4 +58,27 @@ func extractPortOnly(remoteAddr string) string {
 		return ""
 	}
 	return port
+}
+
+// encodeBase64URL encodes a string using Base64 URL encoding
+func encodeBase64URL(s string) string {
+	return base64.URLEncoding.EncodeToString([]byte(s))
+}
+
+// decodeBase64URL decodes a Base64 URL encoded string
+func decodeBase64URL(s string) (string, error) {
+	decoded, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+// createTestVFS creates a new VFS instance for tests using the v2 API
+func createTestVFS(tempDir string, logger *log.Logger, developMode bool) (*vfs.VFS, error) {
+	return vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: developMode,
+	})
 }
