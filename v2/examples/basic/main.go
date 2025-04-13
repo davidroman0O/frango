@@ -7,30 +7,27 @@ import (
 	"net/http"
 
 	"github.com/davidroman0O/frango/v2"
-	"github.com/davidroman0O/frango/v2/pkg/vfs"
 )
 
 //go:embed index.php
 var indexPHP embed.FS
 
+//go:embed side.php
+var sidePHP embed.FS
+
 func main() {
-	php, err := frango.New(frango.WithDevelopmentMode(true))
+	php, err := frango.New(
+		frango.WithDevelopmentMode(true),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create Frango instance: %v", err)
 	}
 
 	mux := http.NewServeMux()
 
-	vfs, err := vfs.NewVFS()
-	if err != nil {
-		log.Fatalf("No VFS %s", err)
-	}
-
-	if err := vfs.AddEmbeddedFile(indexPHP, "index.php", "index.php"); err != nil {
-		log.Fatalf("Failed to add embedded file: %v", err)
-	}
-
-	mux.Handle("/", php.ForVFS(vfs, "index.php"))
+	php.AddEmbeddedFile(indexPHP, "index.php", "index.php")
+	php.AddEmbeddedFile(sidePHP, "side.php", "side.php")
+	mux.Handle("/", php.For("index.php"))
 
 	http.ListenAndServe(":8080", mux)
 }

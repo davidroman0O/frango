@@ -23,6 +23,21 @@ func (p *StandardGlobalsProvider) GetScript() string {
 // This script initializes PHP superglobals and provides helpers for accessing request data.
 
 //=====================================
+// DIRECTORY SETUP
+//=====================================
+
+// Set the correct working directory for includes if SCRIPT_DIR is provided
+if (isset($_SERVER['SCRIPT_DIR']) && $_SERVER['SCRIPT_DIR'] !== '') {
+    // Save original directory to restore later if needed
+    $GLOBALS['__ORIGINAL_DIR__'] = getcwd();
+    
+    // Change to the script's directory for proper include resolution
+    if (is_dir($_SERVER['SCRIPT_DIR'])) {
+        chdir($_SERVER['SCRIPT_DIR']);
+    }
+}
+
+//=====================================
 // INITIALIZE PHP SUPERGLOBALS
 //=====================================
 
@@ -103,6 +118,16 @@ foreach ($_SERVER as $key => $value) {
         // Remove from $_SERVER to avoid namespace pollution
         unset($_SERVER[$key]);
     }
+}
+
+//=====================================
+// MAGIC CONSTANTS HANDLING
+//=====================================
+
+// If logical filename is set, provide helper function to emulate __FILE__ and __DIR__
+if (isset($_SERVER['LOGICAL_FILENAME'])) {
+    $GLOBALS['LOGICAL_FILENAME'] = $_SERVER['LOGICAL_FILENAME'];
+    $GLOBALS['LOGICAL_DIRNAME'] = dirname($_SERVER['LOGICAL_FILENAME']);
 }
 
 //=====================================

@@ -1,20 +1,22 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
-	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/davidroman0O/frango/v2/pkg/php"
 	"github.com/davidroman0O/frango/v2/pkg/vfs"
-	"github.com/dunglas/frankenphp"
 )
 
 // Config holds configuration for the executor
@@ -112,52 +114,38 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 		return
 	}
 
-	// 4. Create the PHP wrapper script
-	// Use the *resolved* physical path for the wrapper content, but pass the original path for context
-	wrapperPath, err := e.createPhpWrapper(resolvedPath, scriptPath)
-	if err != nil {
-		e.handleExecutionError(w, r, fmt.Errorf("failed to create PHP wrapper: %w", err), http.StatusInternalServerError, scriptPath, resolvedPath)
-		return
-	}
-	defer func() {
-		if err := os.Remove(wrapperPath); err != nil && logger != nil {
-			logger.Printf("Executor: Warning - Failed to remove temporary wrapper script %s: %v", wrapperPath, err)
-		} else if logger != nil {
-			logger.Printf("Executor: Removed temporary wrapper script %s", wrapperPath)
-		}
-	}() // Ensure cleanup
-
-	if logger != nil {
-		logger.Printf("Executor: Created temporary wrapper script at %s", wrapperPath)
-	}
-
-	// 5. Prepare Go-specific environment data
+	// 4. Prepare Go-specific environment data
 	goEnvData := e.prepareEnvironmentData(requestData, scriptPath, resolvedPath, renderFn, w, r)
 
-	// 6. Prepare document root and script name for FrankenPHP
-	documentRoot := filepath.Dir(wrapperPath)
-	scriptName := "/" + filepath.Base(wrapperPath)
+	// 5. Prepare document root and script name for FrankenPHP
+	documentRoot := filepath.Dir(resolvedPath)
 	originalScriptName := "/" + filepath.Base(scriptPath) // The original script name for PHP_SELF, etc.
 
 	if logger != nil {
-		logger.Printf("Executor: Setup paths - DocumentRoot='%s', ScriptName='%s', OriginalScriptName='%s'",
-			documentRoot, scriptName, originalScriptName)
+		logger.Printf("Executor: Setup paths - DocumentRoot='%s', ScriptName='%s'",
+			documentRoot, originalScriptName)
 	}
 
-	// 7. Build the final PHP environment variables
-	// Pass original scriptPath for SCRIPT_NAME, resolvedPath for DOCUMENT_ROOT base
-	phpEnv := e.buildPhpEnvironment(requestData, goEnvData, wrapperPath, documentRoot, originalScriptName, r)
+	// 6. Build the final PHP environment variables
+	phpEnv := e.buildPhpEnvironment(requestData, goEnvData, resolvedPath, documentRoot, originalScriptName, r)
 
 	// Add globals file path to environment
 	phpEnv["PHP_GLOBALS_FILE"] = globalsFile
 
+	// Add script directory to environment for proper includes
+	scriptDir := filepath.Dir(resolvedPath)
+	phpEnv["SCRIPT_DIR"] = scriptDir
+
+	// Add logical filename for emulating __FILE__ and __DIR__
+	phpEnv["LOGICAL_FILENAME"] = resolvedPath
+
 	// Log environment variables in debug mode
 	e.logEnvironmentVariables(phpEnv)
 
-	// 8. Execute the PHP script
-	phpOutput, exitCode, execErr := executePHP(r.Context(), wrapperPath, phpEnv, r, logger)
+	// 7. Execute the PHP script directly (no wrapper)
+	phpOutput, exitCode, execErr := executePHP(r.Context(), resolvedPath, phpEnv, r, logger)
 
-	// 9. Check for PHP execution errors
+	// 8. Check for PHP execution errors
 	err = e.CheckPHPErrors(w, r, execErr, exitCode, phpOutput, scriptPath, resolvedPath)
 	if err != nil {
 		// Error was handled by CheckPHPErrors (either custom handler or default)
@@ -168,7 +156,7 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 		return // Stop processing, error response already sent
 	}
 
-	// 10. If no errors, write the captured PHP output to the original ResponseWriter
+	// 9. If no errors, write the captured PHP output to the original ResponseWriter
 	if logger != nil {
 		// Log output size instead of content for brevity
 		logger.Printf("Executor: PHP script executed successfully (Exit Code: %d). Writing %d bytes of output.", exitCode, len(phpOutput))
@@ -185,100 +173,136 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 	}
 }
 
-// executePHP executes a PHP script using FrankenPHP and returns the output, exit code, and any error result.
+// executePHP executes a PHP script using the PHP CLI and returns the output, exit code, and any error result.
 func executePHP(ctx context.Context, scriptPath string, env map[string]string, r *http.Request, logger *log.Logger) ([]byte, int, error) {
 	if logger != nil {
-		logger.Printf("Executor: Executing PHP script: %s", scriptPath)
+		logger.Printf("Executor: Executing PHP script directly: %s", scriptPath)
 		logger.Printf("Executor: Total PHP environment variables: %d", len(env))
 	}
 
-	// Determine document root from environment (must be the parent directory of the script)
-	documentRoot := env["DOCUMENT_ROOT"]
-
-	// CRITICAL: Modify the request clone path to match the script name
-	reqClone := r.Clone(ctx)
-	reqClone.URL.Path = env["SCRIPT_NAME"]
-
-	if logger != nil {
-		logger.Printf("Executor: Modified request path for FrankenPHP: %s", reqClone.URL.Path)
-	}
-
-	// Dump environment variables for debugging (in verbose logging mode)
-	if logger != nil && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
-		var keys []string
-		for k := range env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			v := env[k]
-			logger.Printf("  %s = %s", k, v)
-		}
-	}
-
-	// Create FrankenPHP request
-	phpRequest, err := frankenphp.NewRequestWithContext(
-		reqClone, // Use the modified request with the script path
-		frankenphp.WithRequestDocumentRoot(documentRoot, false), // Exact document root
-		frankenphp.WithRequestEnv(env),                          // All environment variables
-	)
+	// Create a temporary PHP file that includes the globals and executes the target script
+	tempDir, err := os.MkdirTemp("", "php-exec-")
 	if err != nil {
-		if logger != nil {
-			logger.Printf("Executor: Error creating PHP request: %v", err)
+		return nil, 1, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Get the script directory for proper include resolution
+	scriptDir := filepath.Dir(scriptPath)
+	if dir, ok := env["SCRIPT_DIR"]; ok && dir != "" {
+		scriptDir = dir
+	}
+
+	// Create the wrapper script
+	wrapperPath := filepath.Join(tempDir, "wrapper.php")
+	wrapperContent := `<?php
+// Direct PHP executor wrapper
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+// Set include path to include the script directory
+set_include_path(get_include_path() . PATH_SEPARATOR . '` + scriptDir + `');
+
+// Change to script directory if it exists
+if (is_dir('` + scriptDir + `')) {
+    chdir('` + scriptDir + `');
+}
+
+// Set up server variables
+foreach ($_SERVER as $key => $value) {
+    $_SERVER[$key] = $value;
+}
+
+// Setup path parameters
+if (isset($_SERVER['_PATH']) && $_SERVER['_PATH'] !== '{}') {
+    $pathParams = json_decode($_SERVER['_PATH'], true);
+    if (is_array($pathParams)) {
+        $_GET = array_merge($_GET, $pathParams);
+    }
+}
+
+// Make additional environment data available
+if (isset($_SERVER['_JSON']) && $_SERVER['_JSON'] !== '{}') {
+    $_JSON = json_decode($_SERVER['_JSON'], true);
+}
+
+// Include the target script
+include '` + scriptPath + `';
+`
+
+	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
+		return nil, 1, fmt.Errorf("failed to write wrapper script: %w", err)
+	}
+
+	// Create PHP command
+	cmd := exec.CommandContext(ctx, "php", wrapperPath)
+
+	// Set environment variables
+	cmdEnv := os.Environ()
+	for k, v := range env {
+		cmdEnv = append(cmdEnv, k+"="+v)
+	}
+	cmd.Env = cmdEnv
+
+	// Capture output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Run the command
+	err = cmd.Run()
+
+	// Get exit code
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
 		}
-		return nil, 1, fmt.Errorf("failed to create PHP request: %w", err)
 	}
 
-	// Create a recorder to capture the output
-	recorder := httptest.NewRecorder()
+	// Combine stdout and stderr for the response
+	output := stdout.Bytes()
+	stderrOutput := stderr.Bytes()
 
-	// Execute the PHP script
-	execErr := frankenphp.ServeHTTP(recorder, phpRequest)
-	if execErr != nil && logger != nil {
-		logger.Printf("Executor: Error executing PHP script: %v", execErr)
+	// Log stderr if not empty
+	if len(stderrOutput) > 0 && logger != nil {
+		logger.Printf("Executor: PHP stderr: %s", string(stderrOutput))
 	}
-
-	// Get the response body to check for PHP errors
-	respBody := recorder.Body.String()
 
 	// Check for PHP errors in the content
-	phpErrorResult := php.CheckErrors(respBody)
+	phpErrorResult := php.CheckErrors(string(output))
 
-	// Division by zero is a critical error that should always trigger the error handler
-	divisionByZeroErr := strings.Contains(strings.ToLower(respBody), "division by zero")
+	// Look for division by zero errors
+	divisionByZeroErr := strings.Contains(strings.ToLower(string(output))+strings.ToLower(string(stderrOutput)), "division by zero")
 	if divisionByZeroErr && phpErrorResult == nil {
 		phpErrorResult = &php.ErrorResult{
 			Type:      php.ErrorFatal,
 			Indicator: "Division by zero error detected",
-			Context:   "FrankenPHP detected division by zero in script execution",
+			Context:   "PHP detected division by zero in script execution",
 		}
 	}
 
-	// Get the status code (default to 0 for success)
-	exitCode := 0
-	if execErr != nil {
-		exitCode = 1
-	}
-
 	// Log output in debug mode
-	if logger != nil && len(respBody) > 0 && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
-		if len(respBody) > 200 {
-			logger.Printf("Executor: PHP output (truncated): %s...", respBody[:200])
+	if logger != nil && len(output) > 0 && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
+		if len(output) > 200 {
+			logger.Printf("Executor: PHP output (truncated): %s...", string(output[:200]))
 		} else {
-			logger.Printf("Executor: PHP output: %s", respBody)
+			logger.Printf("Executor: PHP output: %s", string(output))
 		}
 	}
 
 	// Return the combined error if we have PHP errors
 	var resultErr error
-	if execErr != nil || phpErrorResult != nil {
+	if err != nil || phpErrorResult != nil {
 		resultErr = &PHPExecutionError{
-			ExecErr:        execErr,
+			ExecErr:        err,
 			PHPErrorResult: phpErrorResult,
 		}
 	}
 
-	return []byte(respBody), exitCode, resultErr
+	return output, exitCode, resultErr
 }
 
 // ensurePhpGlobals ensures that the PHP globals script is installed in the VFS
@@ -291,98 +315,161 @@ func (e *Executor) ensurePhpGlobals(v *vfs.VFS, globalsPath string) error {
 	// Get the PHP globals script from the php package
 	provider := &php.StandardGlobalsProvider{}
 
-	// Install the globals script
-	return v.CreateVirtualFile(globalsPath, []byte(provider.GetScript()))
-}
+	// Create a more robust globals script that properly sets up the PHP environment for direct execution
+	globalsScript := `<?php
+// PHP Globals script for the Go-PHP Executor
+// This script sets up the PHP environment for proper script execution
 
-// createPhpWrapper creates a wrapper PHP script that includes the actual target script
-// It handles setting up the include path, working directory, and globals
-func (e *Executor) createPhpWrapper(resolvedScriptPath, originalScriptPath string) (string, error) {
-	logger := e.config.Logger
-	vfs := e.vfs
-
-	if logger != nil {
-		logger.Printf("Creating PHP wrapper for script: %s (resolved to: %s)", originalScriptPath, resolvedScriptPath)
-	}
-
-	// 1. Generate a unique wrapper filename
-	targetFilename := filepath.Base(resolvedScriptPath)
-	wrapperFilename := fmt.Sprintf("_wrapper_%s_%s", calculateScriptPathHash(originalScriptPath), targetFilename)
-	wrapperPath := filepath.Join(vfs.GetTempDir(), wrapperFilename)
-
-	// 2. Copy the original PHP file to VFS temp directory
-	targetPath := filepath.Join(vfs.GetTempDir(), targetFilename)
-
-	// Read the original file content
-	originalContent, err := os.ReadFile(resolvedScriptPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read PHP file: %w", err)
-	}
-
-	// Write it to the target location
-	if err := os.WriteFile(targetPath, originalContent, 0644); err != nil {
-		return "", fmt.Errorf("failed to prepare PHP file: %w", err)
-	}
-
-	// 3. Path to the globals file (defined in PHP globals provider)
-	globalsFile := "/_frango_php_globals.php"
-	globalsFilePath := filepath.Join(vfs.GetTempDir(), strings.TrimPrefix(globalsFile, "/"))
-
-	// 4. Get the directory of the original script - critical for include path resolution
-	// Remove any path parameters from the path to ensure it's a valid directory
-	cleanOrigPath := e.sanitizePathForChdir(resolvedScriptPath)
-	originalScriptDir := filepath.Dir(cleanOrigPath)
-
-	// Ensure the directory exists before using it
-	if _, err := os.Stat(originalScriptDir); os.IsNotExist(err) {
-		// If directory doesn't exist, use a fallback that we know exists
-		originalScriptDir = vfs.GetTempDir()
-	}
-
-	// 5. Create a wrapper that properly sets up include paths before including the target script
-	wrapperContent := fmt.Sprintf(`<?php
-// Auto-generated wrapper for %s
-// This wrapper provides isolation between different script executions
-// Script hash: %s
-
-// Load common globals defined by frango
-require_once '%s';
-
-// Save the current working directory and include path
-$original_dir = getcwd();
-$original_include_path = get_include_path();
-
-// Set up the working directory to the original script's directory
-// This will make all relative includes in the target script work correctly
-chdir('%s');
-set_include_path(get_include_path() . PATH_SEPARATOR . '%s');
-
-// Define helper functions for resolving paths relative to the original script
-if (!function_exists('script_path')) {
-    function script_path($path) {
-        return '%s' . DIRECTORY_SEPARATOR . $path;
+// If SCRIPT_DIR is set, change to that directory to ensure includes work properly
+if (isset($_SERVER['SCRIPT_DIR']) && $_SERVER['SCRIPT_DIR'] !== '') {
+    if (is_dir($_SERVER['SCRIPT_DIR'])) {
+        // Change working directory to script directory for proper include resolution
+        chdir($_SERVER['SCRIPT_DIR']);
     }
 }
 
-// Include the target PHP script
-try {
-    include './%s';
-} finally {
-    // Restore original working directory and include path
-    chdir($original_dir);
-    set_include_path($original_include_path);
+// Set up custom error handler to capture fatal errors
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    // Only handle fatal errors that would halt execution
+    if ($errno == E_ERROR || $errno == E_PARSE || $errno == E_CORE_ERROR || 
+        $errno == E_COMPILE_ERROR || $errno == E_USER_ERROR) {
+        
+        // Save error information in environment variables
+        putenv("PHP_LAST_ERROR=" . $errstr);
+        putenv("PHP_ERROR_TYPE=fatal");
+        putenv("PHP_ERROR_CONTEXT=Error in " . $errfile . " on line " . $errline);
+        
+        // Log the error
+        error_log("PHP Fatal Error: " . $errstr . " in " . $errfile . " on line " . $errline);
+    }
+    
+    // Return false to allow the standard PHP error handler to run
+    return false;
+});
+
+// Merge path parameters into $_GET for compatibility
+if (isset($_SERVER['_PATH']) && $_SERVER['_PATH'] !== '{}') {
+    $pathParams = json_decode($_SERVER['_PATH'], true);
+    if (is_array($pathParams)) {
+        $_GET = array_merge($_GET, $pathParams);
+    }
 }
-?>`, resolvedScriptPath, calculateScriptPathHash(originalScriptPath), globalsFilePath,
-		originalScriptDir, originalScriptDir, originalScriptDir, targetFilename)
 
-	// Create the wrapper script
-	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
-		return "", fmt.Errorf("failed to create wrapper: %w", err)
-	}
+// Make additional environment data available to the script
+if (isset($_SERVER['_JSON']) && $_SERVER['_JSON'] !== '{}') {
+    $_JSON = json_decode($_SERVER['_JSON'], true);
+}
 
+// Load globals from the PHP package
+` + provider.GetScript()
+
+	// Install the globals script
+	return v.CreateVirtualFile(globalsPath, []byte(globalsScript))
+}
+
+// handleExecutionError processes PHP execution errors and serves error responses
+func (e *Executor) handleExecutionError(w http.ResponseWriter, r *http.Request, err error, statusCode int, scriptPath, originalScriptPath string) {
+	logger := e.config.Logger
 	if logger != nil {
-		logger.Printf("Created PHP wrapper at: %s", wrapperPath)
+		logger.Printf("Executor: Handling execution error for '%s': %v (HTTP %d)", scriptPath, err, statusCode)
 	}
 
-	return wrapperPath, nil
+	// Extract any structured PHP error if available
+	var phpErr *PHPExecutionError
+	if errors.As(err, &phpErr) && phpErr.PHPErrorResult != nil {
+		// Use the PHP error details for the error response
+		errorDetails := phpErr.PHPErrorResult.Context
+		errorType := phpErr.PHPErrorResult.Type
+
+		// Custom handler logic starts here
+		if e.config.ErrorHandlerPath != "" && errorType != php.ErrorNotice {
+			// Define internal PHP error handling parameters
+			errorHandlingParams := map[string]string{
+				"error_type":      string(errorType),
+				"error_message":   phpErr.PHPErrorResult.Indicator,
+				"error_context":   errorDetails,
+				"script_path":     scriptPath,
+				"original_script": originalScriptPath,
+			}
+
+			// Call error handler PHP script
+			errHandlerReq := r.Clone(r.Context())
+
+			// Format original query for error handler
+			errURL, _ := url.Parse(e.config.ErrorHandlerPath)
+			q := errURL.Query()
+			for k, v := range errorHandlingParams {
+				q.Set(k, v)
+			}
+			errURL.RawQuery = q.Encode()
+
+			// Set the error handler URL
+			errHandlerReq.URL = errURL
+
+			// Execute the error handler script
+			e.Execute(e.vfs, e.config.ErrorHandlerPath, nil, w, errHandlerReq)
+			return
+		}
+
+		// No custom handler or notice-level error - generate a default error response
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(statusCode)
+
+		// Get any PHP stderr output if available
+		phpStderr := ""
+		if phpErr.ExecErr != nil {
+			// Try to extract stderr from the error if it's an exec.ExitError
+			if exitErr, ok := phpErr.ExecErr.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+				phpStderr = string(exitErr.Stderr)
+			}
+		}
+
+		// Format the error in a user-friendly way
+		if e.config.DisplayErrors {
+			// Display detailed error information if enabled
+			errorHTML := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>PHP Error</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .error-container { border: 1px solid #f44336; padding: 15px; border-radius: 4px; }
+        .error-type { color: #f44336; font-weight: bold; }
+        .error-message { margin: 10px 0; }
+        .error-context { font-family: monospace; background: #f1f1f1; padding: 10px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <h2 class="error-type">PHP %s Error</h2>
+        <div class="error-message">%s</div>
+        <pre class="error-context">%s</pre>
+    </div>
+</body>
+</html>`, errorType, htmlEscape(phpErr.PHPErrorResult.Indicator),
+				htmlEscape(phpStderr))
+			w.Write([]byte(errorHTML))
+		} else {
+			// Simplified error for production
+			w.Write([]byte("PHP Execution Error. Please check the server logs for details."))
+		}
+		return
+	}
+
+	// For direct executor errors, especially from PHP CLI
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(statusCode)
+
+	// For direct executor errors, check if the error is from PHP command execution
+	if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+		// Direct output from PHP is most useful for debugging
+		w.Write(exitErr.Stderr)
+	} else {
+		w.Write([]byte("PHP Execution Error: " + err.Error()))
+	}
+}
+
+// htmlEscape escapes HTML special characters
+func htmlEscape(s string) string {
+	return html.EscapeString(s)
 }
