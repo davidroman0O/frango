@@ -2,7 +2,7 @@
 
 require_once "side.php";
 
-echo "Hello, World!";
+echo "Hello, php!";
 
 ?>
 <DOCTYPE html>

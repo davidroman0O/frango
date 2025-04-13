@@ -17,184 +17,101 @@ var (
 	scriptNotFoundErr = errors.New("php script not found or could not be executed")
 )
 
-// CheckPHPErrors analyzes PHP execution results and handles errors appropriately.
-// It returns an error if PHP execution failed and the error was handled.
-// Returns nil if execution was successful (even with warnings).
-func (e *Executor) CheckPHPErrors(
-	w http.ResponseWriter,
-	r *http.Request,
-	execErr error,
-	exitCode int,
-	phpOutput []byte,
-	scriptPath, resolvedPath string,
-) error {
-	config := e.config
-	logger := config.Logger
+// CheckPHPErrors checks for and handles PHP execution errors.
+func (e *Executor) CheckPHPErrors(w http.ResponseWriter, r *http.Request, execErr error, exitCode int, output []byte, scriptPath, resolvedPath string) error {
+	logger := e.config.Logger
 
-	// 1. Unwrap the new error type if we have one
-	var phpExecErr *PHPExecutionError
-	if errors.As(execErr, &phpExecErr) {
-		// Extract the individual components
-		execErr = phpExecErr.ExecErr
-		phpErrorResult := phpExecErr.PHPErrorResult
-
-		// Handle PHP content errors even if exec error is nil
-		if execErr == nil && phpErrorResult != nil {
-			// Fatal PHP error detected in content (division by zero, etc.)
-			if phpErrorResult.Type == php.ErrorFatal {
-				errMsg := fmt.Sprintf("PHP fatal error: %s", phpErrorResult.Indicator)
-				if logger != nil {
-					logger.Printf("Executor: %s. Context: %s", errMsg, limitString(phpErrorResult.Context, 500))
-				}
-
-				// If we have a custom error handler, use it
-				if config.ErrorHandlerPath != "" {
-					return e.executeErrorHandler(w, r, phpErrorResult, phpOutput, scriptPath, resolvedPath)
-				}
-
-				if config.DisplayErrors {
-					// Display the error to the client
-					w.WriteHeader(http.StatusInternalServerError)
-					w.Write(phpOutput)
-				} else {
-					// Use custom error handler or default error response
-					internalErr := fmt.Errorf("PHP fatal error: %s", phpErrorResult.Indicator)
-					return e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
-				}
-
-				// Return an error to indicate the error was handled
-				return fmt.Errorf("PHP fatal error: %s", phpErrorResult.Indicator)
-			}
-
-			// Log warnings but treat as successful execution
-			if phpErrorResult.Type == php.ErrorWarning && logger != nil {
-				logger.Printf("Executor: PHP script executed with warnings/notices. Script: %s", scriptPath)
-			}
-
-			// Non-fatal error, continue processing
-			return nil
-		}
+	// Quick return if no error and success status
+	if execErr == nil && exitCode == 0 {
+		// No error detected
+		return nil
 	}
 
-	// 2. Handle FrankenPHP execution errors (couldn't execute PHP)
+	// Check for PHP errors in the output content
+	phpErrorResult := e.detectPHPErrors(execErr, output, scriptPath)
+	if phpErrorResult == nil && execErr == nil {
+		// No error detected
+		return nil
+	}
+
+	if logger != nil {
+		logger.Printf("Executor: PHP execution error detected: %v (Exit Code: %d)",
+			execErr, exitCode)
+	}
+
+	// Handle the error based on configuration
+	return e.handlePHPErrors(w, r, phpErrorResult, execErr, output, scriptPath, resolvedPath)
+}
+
+// detectPHPErrors checks for PHP errors in the execution result and output
+func (e *Executor) detectPHPErrors(execErr error, output []byte, scriptPath string) *php.ErrorResult {
+	// First check if there's an execution error
 	if execErr != nil {
-		if logger != nil {
-			logger.Printf("Executor: PHP execution error: %v (Exit Code: %d)", execErr, exitCode)
-		}
-
-		// If we have a custom error handler, use it
-		if config.ErrorHandlerPath != "" {
-			// Create an error result for the handler
-			phpErrorResult := &php.ErrorResult{
-				Type:      php.ErrorFatal,
-				Indicator: execErr.Error(),
-				Context:   fmt.Sprintf("Error executing PHP script: %v", execErr),
-			}
-			return e.executeErrorHandler(w, r, phpErrorResult, phpOutput, scriptPath, resolvedPath)
-		}
-
-		return e.handleExecutionError(w, r, execErr, http.StatusInternalServerError, scriptPath, resolvedPath)
-	}
-
-	// 3. Check for PHP_LAST_ERROR from our error handler in globals.go
-	// This allows us to catch PHP errors like division by zero that our custom error handler detected
-	var phpErrorResult *php.ErrorResult
-	lastError := os.Getenv("PHP_LAST_ERROR")
-	errorType := os.Getenv("PHP_ERROR_TYPE")
-	errorContext := os.Getenv("PHP_ERROR_CONTEXT")
-
-	if lastError != "" {
-		// We have an error reported by our custom PHP error handler
-		phpErrorResult = &php.ErrorResult{
-			Type:      php.ErrorType(errorType),
-			Indicator: lastError,
-			Context:   errorContext,
-		}
-
-		// If the type is empty, default to fatal for errors that triggered our handler
-		if errorType == "" {
-			phpErrorResult.Type = php.ErrorFatal
-		}
-
-		if logger != nil {
-			logger.Printf("Executor: PHP error detected via custom error handler: %s", lastError)
-		}
-
-		// Division by zero errors need special handling
-		if strings.Contains(strings.ToLower(lastError), "division by zero") {
-			phpErrorResult.Indicator = "Division by zero"
-			phpErrorResult.Type = php.ErrorFatal
+		// If we already have a PHP-specific error embedded, extract it
+		if phpErr, ok := execErr.(*PHPExecutionError); ok && phpErr.PHPErrorResult != nil {
+			return phpErr.PHPErrorResult
 		}
 	}
 
-	// If no error from environment, check the output for error patterns
-	if phpErrorResult == nil {
-		outputStr := string(phpOutput)
-		phpErrorResult = php.CheckErrors(outputStr)
+	// Otherwise, check for errors in the output content
+	phpErrorResult := php.CheckErrors(string(output))
 
-		// Check for division by zero in the output if not already detected
-		if phpErrorResult == nil && strings.Contains(strings.ToLower(outputStr), "division by zero") {
-			phpErrorResult = &php.ErrorResult{
-				Type:      php.ErrorFatal,
-				Indicator: "Division by zero",
-				Context:   outputStr,
-			}
-		} else if phpErrorResult != nil && strings.Contains(strings.ToLower(outputStr), "division by zero") {
-			// Make sure division by zero errors always have the correct indicator
-			phpErrorResult.Indicator = "Division by zero"
+	// Special handling for division by zero errors which might not be caught by the error checker
+	divisionByZeroErr := strings.Contains(strings.ToLower(string(output)), "division by zero")
+	if divisionByZeroErr && phpErrorResult == nil {
+		return &php.ErrorResult{
+			Type:      php.ErrorFatal,
+			Indicator: "Division by zero error detected",
+			Context:   "FrankenPHP detected division by zero in script execution",
 		}
 	}
 
-	// Check for fatal errors that need special handling
-	if exitCode != 0 || (phpErrorResult != nil && phpErrorResult.Type == php.ErrorFatal) {
-		// Extract the error message for logging
-		errMsg := "PHP execution failed"
-		if exitCode != 0 {
-			errMsg = fmt.Sprintf("%s with exit code %d", errMsg, exitCode)
-		}
+	return phpErrorResult
+}
 
+// handlePHPErrors handles PHP errors based on configuration
+func (e *Executor) handlePHPErrors(w http.ResponseWriter, r *http.Request, phpErrorResult *php.ErrorResult,
+	execErr error, output []byte, scriptPath, resolvedPath string) error {
+
+	logger := e.config.Logger
+	config := e.config
+
+	// If we have a custom error handler, use it
+	if config.ErrorHandlerPath != "" && !strings.Contains(scriptPath, config.ErrorHandlerPath) {
 		if logger != nil {
-			logger.Printf("Executor: %s. Output: %s", errMsg, limitString(string(phpOutput), 500))
+			logger.Printf("Executor: Using custom error handler for script '%s'", scriptPath)
 		}
+		return e.executeErrorHandler(w, r, phpErrorResult, output, scriptPath, resolvedPath)
+	}
 
-		// If we have a custom error handler, use it
-		if config.ErrorHandlerPath != "" {
-			// Ensure PHP error result is set even if it came from a non-standard error
-			if phpErrorResult == nil {
-				phpErrorResult = &php.ErrorResult{
-					Type:      php.ErrorFatal,
-					Indicator: "PHP execution error",
-					Context:   fmt.Sprintf("FrankenPHP detected error with exit code %d", exitCode),
-				}
-			}
+	// Otherwise, use default error handling
+	return e.defaultErrorHandler(w, phpErrorResult, execErr, scriptPath)
+}
 
-			return e.executeErrorHandler(w, r, phpErrorResult, phpOutput, scriptPath, resolvedPath)
-		}
+// defaultErrorHandler implements the default error handling logic
+func (e *Executor) defaultErrorHandler(w http.ResponseWriter, phpErrorResult *php.ErrorResult, execErr error, scriptPath string) error {
+	config := e.config
 
-		if config.DisplayErrors {
-			// Display the full error output to the client since DisplayErrors is true
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write(phpOutput)
-		} else {
-			// Use custom error handler or default error response
-			internalErr := fmt.Errorf("PHP execution error: exit code %d", exitCode)
-			return e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
-		}
-
-		// Return an error to indicate the error was handled
+	// Generate an appropriate error message
+	var errMessage string
+	if config.DevelopmentMode && config.DisplayErrors {
+		// In dev mode with display errors, show the full error
 		if phpErrorResult != nil {
-			return fmt.Errorf("PHP execution failed: %s", phpErrorResult.Indicator)
+			errMessage = fmt.Sprintf("PHP %s Error: %s\nContext: %s",
+				phpErrorResult.Type, phpErrorResult.Indicator, phpErrorResult.Context)
+		} else if execErr != nil {
+			errMessage = fmt.Sprintf("PHP Execution Error: %v", execErr)
+		} else {
+			errMessage = "Unknown PHP Error"
 		}
-		return fmt.Errorf("PHP execution failed: %s", limitString(string(phpOutput), 100))
+	} else {
+		// In production or when errors are hidden, use a generic message
+		errMessage = "The server encountered an error processing your request."
 	}
 
-	// 3. Log warnings but treat as successful execution
-	if phpErrorResult != nil && phpErrorResult.Type == php.ErrorWarning && logger != nil {
-		logger.Printf("Executor: PHP script executed with warnings/notices. Script: %s", scriptPath)
-	}
-
-	// No fatal errors detected, return nil to indicate successful execution
-	return nil
+	// Send the error response
+	http.Error(w, errMessage, http.StatusInternalServerError)
+	return execErr
 }
 
 // executeErrorHandler runs the custom error handler for PHP errors
