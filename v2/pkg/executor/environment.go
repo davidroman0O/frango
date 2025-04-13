@@ -200,7 +200,7 @@ func marshalToEnv(value interface{}, key, fallback string, envData map[string]st
 func (e *Executor) buildPhpEnvironment(
 	requestData *RequestData,
 	goEnvData map[string]string,
-	phpFilePath string, // Actual path to the PHP script for direct execution
+	phpFilePath string, // Actual path to the wrapper script for execution
 	documentRoot string, // Must be the parent directory of the script
 	originalScriptName string, // The original script name for PHP_SELF, etc.
 	r *http.Request,

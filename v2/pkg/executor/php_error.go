@@ -59,7 +59,7 @@ func (e *Executor) CheckPHPErrors(
 				} else {
 					// Use custom error handler or default error response
 					internalErr := fmt.Errorf("PHP fatal error: %s", phpErrorResult.Indicator)
-					e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
+					return e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
 				}
 
 				// Return an error to indicate the error was handled
@@ -93,8 +93,7 @@ func (e *Executor) CheckPHPErrors(
 			return e.executeErrorHandler(w, r, phpErrorResult, phpOutput, scriptPath, resolvedPath)
 		}
 
-		e.handleExecutionError(w, r, execErr, http.StatusInternalServerError, scriptPath, resolvedPath)
-		return execErr
+		return e.handleExecutionError(w, r, execErr, http.StatusInternalServerError, scriptPath, resolvedPath)
 	}
 
 	// 3. Check for PHP_LAST_ERROR from our error handler in globals.go
@@ -179,7 +178,7 @@ func (e *Executor) CheckPHPErrors(
 		} else {
 			// Use custom error handler or default error response
 			internalErr := fmt.Errorf("PHP execution error: exit code %d", exitCode)
-			e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
+			return e.handleExecutionError(w, r, internalErr, http.StatusInternalServerError, scriptPath, resolvedPath)
 		}
 
 		// Return an error to indicate the error was handled
@@ -198,7 +197,7 @@ func (e *Executor) CheckPHPErrors(
 	return nil
 }
 
-// executeErrorHandler executes a custom PHP error handler script.
+// executeErrorHandler runs the custom error handler for PHP errors
 func (e *Executor) executeErrorHandler(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -210,23 +209,39 @@ func (e *Executor) executeErrorHandler(
 	logger := config.Logger
 	errorHandlerPath := config.ErrorHandlerPath
 
-	if errorHandlerPath == "" {
-		return fmt.Errorf("no error handler configured")
-	}
-
 	if logger != nil {
 		logger.Printf("Executor: Using custom error handler: %s", errorHandlerPath)
 	}
 
-	// Check if the error handler itself exists
-	if !e.vfs.FileExists(errorHandlerPath) {
+	// Ensure the proper path normalization
+	if !strings.HasPrefix(errorHandlerPath, "/") {
+		errorHandlerPath = "/" + errorHandlerPath
+	}
+
+	// Debug - check if the file exists in the VFS
+	var fileExists bool
+	if e.vfs != nil {
+		fileExists = e.vfs.FileExists(errorHandlerPath)
+	} else {
+		// If VFS is not available, we can't proceed with error handling
 		if logger != nil {
-			logger.Printf("Executor: Error handler not found: %s", errorHandlerPath)
+			logger.Printf("Executor: No VFS available to check error handler: %s", errorHandlerPath)
+		}
+		fileExists = false
+	}
+
+	if logger != nil {
+		logger.Printf("Executor: Error handler file exists: %v", fileExists)
+	}
+
+	if !fileExists {
+		if logger != nil {
+			logger.Printf("Executor: Error handler not found at %s", errorHandlerPath)
 		}
 		// Fall back to default error handling
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		errorResponse := fmt.Sprintf(`{"status":"error","message":"Error handler not found","details":"%s"}`, errorHandlerPath)
+		errorResponse := fmt.Sprintf(`{"status":"error","message":"Error handler not found","details":"Configured error handler not found: %s"}`, errorHandlerPath)
 		w.Write([]byte(errorResponse))
 		return fmt.Errorf("error handler not found: %s", errorHandlerPath)
 	}
@@ -245,7 +260,12 @@ func (e *Executor) executeErrorHandler(
 		return fmt.Errorf("error resolving error handler: %w", err)
 	}
 
-	// Set up document root for the error handler
+	// Use the error handler script directly without wrapper
+	if logger != nil {
+		logger.Printf("Executor: Executing error handler directly: %s", errorHandlerResolvedPath)
+	}
+
+	// Set up document root for the error handler (parent directory of the script)
 	documentRoot := filepath.Dir(errorHandlerResolvedPath)
 
 	// Extract request data for environment setup
@@ -256,6 +276,30 @@ func (e *Executor) executeErrorHandler(
 
 	// Build PHP environment for error handler
 	phpEnv := e.buildPhpEnvironment(requestData, goEnvData, errorHandlerResolvedPath, documentRoot, errorHandlerPath, r)
+
+	// Add globals file path, logical filename, and directory information
+	globalsFile := "/_frango_php_globals.php"
+	globalsFilePath := filepath.Join(e.vfs.GetTempDir(), strings.TrimPrefix(globalsFile, "/"))
+	phpEnv["auto_prepend_file"] = globalsFilePath
+	phpEnv["SCRIPT_DIR"] = filepath.Dir(errorHandlerResolvedPath)
+	phpEnv["FRANGO_LOGICAL_FILENAME"] = errorHandlerResolvedPath
+	phpEnv["FRANGO_LOGICAL_DIR"] = filepath.Dir(errorHandlerResolvedPath)
+	phpEnv["FRANGO_DO_CHDIR"] = "1"
+	phpEnv["FRANGO_ERROR_HANDLING"] = "1" // Flag to indicate we're handling an error
+
+	// Ensure output buffering for error handler
+	if phpEnv["auto_prepend_text"] == "" {
+		phpEnv["auto_prepend_text"] = "<?php ob_start(); ?>"
+	} else {
+		phpEnv["auto_prepend_text"] = "<?php ob_start(); ?>" + phpEnv["auto_prepend_text"]
+	}
+
+	// Add end buffering to append_text
+	if phpEnv["auto_append_text"] == "" {
+		phpEnv["auto_append_text"] = "<?php if (ob_get_level() > 0) ob_end_flush(); ?>"
+	} else {
+		phpEnv["auto_append_text"] += "<?php if (ob_get_level() > 0) ob_end_flush(); ?>"
+	}
 
 	// Check if PHP_LAST_ERROR is already set from our custom error handler
 	lastError := os.Getenv("PHP_LAST_ERROR")
@@ -291,6 +335,11 @@ func (e *Executor) executeErrorHandler(
 		}
 		// Add the original script path that had the error
 		phpEnv["PHP_ERROR_SCRIPT"] = scriptPath
+
+		// Store the original output for debugging
+		if len(originalOutput) > 0 {
+			phpEnv["PHP_ERROR_OUTPUT"] = string(originalOutput)
+		}
 	} else {
 		// Special case for tests - check if the script contains code for division by zero
 		// Read the original script content to check for division by zero code
@@ -309,12 +358,9 @@ func (e *Executor) executeErrorHandler(
 		}
 	}
 
-	// Add script directory to environment for proper includes
-	scriptDir := filepath.Dir(errorHandlerResolvedPath)
-	phpEnv["SCRIPT_DIR"] = scriptDir
-
-	// Execute the error handler directly
-	errorOutput, errorExitCode, errorExecErr := executePHP(r.Context(), errorHandlerResolvedPath, phpEnv, r, logger)
+	// Execute the error handler
+	errorRecorder, _, errorExecErr := executePhpWithRecorder(r.Context(), errorHandlerResolvedPath, phpEnv, r, logger)
+	errorOutput := errorRecorder.Body.Bytes()
 
 	// Check if the error handler itself failed
 	if errorExecErr != nil {
@@ -348,32 +394,83 @@ func (e *Executor) executeErrorHandler(
 		logger.Printf("Executor: Error handler response: %d bytes", len(errorOutput))
 	}
 
-	// Check for division by zero error explicitly
+	// Copy the response headers from the error handler
+	for key, values := range errorRecorder.Header() {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Special handling for division by zero and other critical errors
 	if phpEnv["PHP_LAST_ERROR"] == "Division by zero." ||
 		(phpErrorResult != nil && strings.Contains(phpErrorResult.Indicator, "Division by zero")) {
-		// Always set 500 status for division by zero
+		// Always force a 500 status for division by zero, overriding the error handler's status
 		w.WriteHeader(http.StatusInternalServerError)
 
-		// Check if the output has a proper format for errors
-		// If not, create a standard JSON error response
+		// If no content type is set or we need to create a custom response
 		if !strings.Contains(string(errorOutput), `"status":"error"`) {
 			w.Header().Set("Content-Type", "application/json")
 			errorResponse := `{"status":"error","message":"PHP Error","details":"Division by zero"}`
-			errorOutput = []byte(errorResponse)
+			w.Write([]byte(errorResponse))
+			return nil
 		}
-	} else if errorExitCode > 0 {
-		// Use the exit code if provided
-		w.WriteHeader(errorExitCode)
 	} else {
-		// Default status code for errors
-		w.WriteHeader(http.StatusInternalServerError)
+		// Use the status code from the error handler response
+		w.WriteHeader(errorRecorder.Code)
 	}
 
-	// Write error handler output
+	// Write the error handler response body
 	w.Write(errorOutput)
 
 	// Error was handled by the custom handler
 	return nil
+}
+
+// handleExecutionError handles errors encountered during PHP execution.
+// It attempts to use a custom error handler script if configured, or falls back to a basic error response.
+func (e *Executor) handleExecutionError(
+	w http.ResponseWriter,
+	r *http.Request,
+	err error,
+	statusCode int,
+	scriptPath, resolvedPath string,
+) error {
+	config := e.config
+	logger := config.Logger
+
+	if logger != nil {
+		logger.Printf("Executor: Handling execution error for '%s': %v (HTTP %d)", scriptPath, err, statusCode)
+	}
+
+	// 1. Check if a custom error handler is configured
+	if config.ErrorHandlerPath != "" && !strings.Contains(scriptPath, config.ErrorHandlerPath) {
+		if logger != nil {
+			logger.Printf("Executor: Attempting to use custom error handler: %s", config.ErrorHandlerPath)
+		}
+
+		// Avoid infinite recursion - don't handle errors from the error handler itself
+		// TODO: Implement the actual error handler logic
+		// For now, use a basic error response
+		// This would usually create a new HTTP request to the error handler
+		// or execute it directly with context about the original error
+	}
+
+	// 2. Default error handling if no custom handler exists or it failed
+	// Use different messages based on development mode and error visibility
+	var errMessage string
+	if config.DevelopmentMode && config.DisplayErrors {
+		// In dev mode with display errors, show the full error
+		errMessage = fmt.Sprintf("PHP Execution Error: %v", err)
+	} else {
+		// In production or when errors are hidden, use a generic message
+		errMessage = "The server encountered an error processing your request."
+	}
+
+	// Send the error response
+	http.Error(w, errMessage, statusCode)
+
+	// Return the error to indicate it was handled
+	return err
 }
 
 // limitString limits a string to the specified maximum length.

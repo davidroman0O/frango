@@ -25,8 +25,12 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	php.AddEmbeddedFile(indexPHP, "index.php", "index.php")
-	php.AddEmbeddedFile(sidePHP, "side.php", "side.php")
+	php.AddSourceFile("./index.php", "index.php")
+	php.AddSourceFile("./side.php", "side.php")
+
+	// php.AddEmbeddedFile(indexPHP, "index.php", "index.php")
+	// php.AddEmbeddedFile(sidePHP, "side.php", "side.php")
+
 	mux.Handle("/", php.For("index.php"))
 
 	http.ListenAndServe(":8080", mux)

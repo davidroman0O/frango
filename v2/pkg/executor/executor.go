@@ -1,22 +1,20 @@
 package executor
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"html"
 	"log"
 	"net/http"
-	"net/url"
+	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/davidroman0O/frango/v2/pkg/php"
 	"github.com/davidroman0O/frango/v2/pkg/vfs"
+	"github.com/dunglas/frankenphp"
 )
 
 // Config holds configuration for the executor
@@ -132,21 +130,29 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 	// Add globals file path to environment
 	phpEnv["PHP_GLOBALS_FILE"] = globalsFile
 
+	// Set auto_prepend_file for better integration with FrankenPHP
+	globalsFilePath := filepath.Join(vfs.GetTempDir(), strings.TrimPrefix(globalsFile, "/"))
+	phpEnv["auto_prepend_file"] = globalsFilePath
+
 	// Add script directory to environment for proper includes
 	scriptDir := filepath.Dir(resolvedPath)
 	phpEnv["SCRIPT_DIR"] = scriptDir
 
-	// Add logical filename for emulating __FILE__ and __DIR__
-	phpEnv["LOGICAL_FILENAME"] = resolvedPath
+	// Add logical filename and dirname for emulating __FILE__ and __DIR__
+	phpEnv["FRANGO_LOGICAL_FILENAME"] = resolvedPath
+	phpEnv["FRANGO_LOGICAL_DIR"] = scriptDir
+
+	// Add environment variable to tell our globals script to set the working directory
+	phpEnv["FRANGO_DO_CHDIR"] = "1"
 
 	// Log environment variables in debug mode
 	e.logEnvironmentVariables(phpEnv)
 
 	// 7. Execute the PHP script directly (no wrapper)
-	phpOutput, exitCode, execErr := executePHP(r.Context(), resolvedPath, phpEnv, r, logger)
+	recorder, exitCode, execErr := executePhpWithRecorder(r.Context(), resolvedPath, phpEnv, r, logger)
 
 	// 8. Check for PHP execution errors
-	err = e.CheckPHPErrors(w, r, execErr, exitCode, phpOutput, scriptPath, resolvedPath)
+	err = e.CheckPHPErrors(w, r, execErr, exitCode, recorder.Body.Bytes(), scriptPath, resolvedPath)
 	if err != nil {
 		// Error was handled by CheckPHPErrors (either custom handler or default)
 		duration := time.Since(startTime)
@@ -156,12 +162,25 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 		return // Stop processing, error response already sent
 	}
 
-	// 9. If no errors, write the captured PHP output to the original ResponseWriter
+	// 9. If no errors, copy the full response (headers and body) to the original ResponseWriter
 	if logger != nil {
-		// Log output size instead of content for brevity
-		logger.Printf("Executor: PHP script executed successfully (Exit Code: %d). Writing %d bytes of output.", exitCode, len(phpOutput))
+		// Log response details
+		logger.Printf("Executor: PHP script executed successfully (Exit Code: %d). Copying response with %d bytes and HTTP status %d.",
+			exitCode, len(recorder.Body.Bytes()), recorder.Code)
 	}
-	_, writeErr := w.Write(phpOutput)
+
+	// Copy all headers from the recorder to the original ResponseWriter
+	for key, values := range recorder.Header() {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Set the status code from the PHP response
+	w.WriteHeader(recorder.Code)
+
+	// Write the body content from the recorder to the original ResponseWriter
+	_, writeErr := w.Write(recorder.Body.Bytes())
 	if writeErr != nil && logger != nil {
 		// Log error if writing the successful response fails
 		logger.Printf("Executor: Error writing PHP output to response writer for %s: %v", scriptPath, writeErr)
@@ -173,136 +192,108 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 	}
 }
 
-// executePHP executes a PHP script using the PHP CLI and returns the output, exit code, and any error result.
-func executePHP(ctx context.Context, scriptPath string, env map[string]string, r *http.Request, logger *log.Logger) ([]byte, int, error) {
+// executePhpWithRecorder executes a PHP script using FrankenPHP and returns the recorder, exit code, and any error result.
+func executePhpWithRecorder(ctx context.Context, scriptPath string, env map[string]string, r *http.Request, logger *log.Logger) (*httptest.ResponseRecorder, int, error) {
 	if logger != nil {
-		logger.Printf("Executor: Executing PHP script directly: %s", scriptPath)
+		logger.Printf("Executor: Executing PHP script: %s", scriptPath)
 		logger.Printf("Executor: Total PHP environment variables: %d", len(env))
 	}
 
-	// Create a temporary PHP file that includes the globals and executes the target script
-	tempDir, err := os.MkdirTemp("", "php-exec-")
-	if err != nil {
-		return nil, 1, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
+	// Determine document root from environment (must be the parent directory of the script)
+	documentRoot := env["DOCUMENT_ROOT"]
 
-	// Get the script directory for proper include resolution
-	scriptDir := filepath.Dir(scriptPath)
-	if dir, ok := env["SCRIPT_DIR"]; ok && dir != "" {
-		scriptDir = dir
+	// Add output buffering control to ensure clean output
+	// This ensures PHP's output buffer is flushed and reset between script executions
+	if env["auto_prepend_text"] == "" {
+		env["auto_prepend_text"] = "<?php ob_clean(); ?>"
+	} else {
+		env["auto_prepend_text"] = "<?php ob_clean(); ?>" + env["auto_prepend_text"]
 	}
 
-	// Create the wrapper script
-	wrapperPath := filepath.Join(tempDir, "wrapper.php")
-	wrapperContent := `<?php
-// Direct PHP executor wrapper
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
+	// CRITICAL: Modify the request clone path to match the script name
+	reqClone := r.Clone(ctx)
+	reqClone.URL.Path = env["SCRIPT_NAME"]
 
-// Set include path to include the script directory
-set_include_path(get_include_path() . PATH_SEPARATOR . '` + scriptDir + `');
-
-// Change to script directory if it exists
-if (is_dir('` + scriptDir + `')) {
-    chdir('` + scriptDir + `');
-}
-
-// Set up server variables
-foreach ($_SERVER as $key => $value) {
-    $_SERVER[$key] = $value;
-}
-
-// Setup path parameters
-if (isset($_SERVER['_PATH']) && $_SERVER['_PATH'] !== '{}') {
-    $pathParams = json_decode($_SERVER['_PATH'], true);
-    if (is_array($pathParams)) {
-        $_GET = array_merge($_GET, $pathParams);
-    }
-}
-
-// Make additional environment data available
-if (isset($_SERVER['_JSON']) && $_SERVER['_JSON'] !== '{}') {
-    $_JSON = json_decode($_SERVER['_JSON'], true);
-}
-
-// Include the target script
-include '` + scriptPath + `';
-`
-
-	if err := os.WriteFile(wrapperPath, []byte(wrapperContent), 0644); err != nil {
-		return nil, 1, fmt.Errorf("failed to write wrapper script: %w", err)
+	if logger != nil {
+		logger.Printf("Executor: Modified request path for FrankenPHP: %s", reqClone.URL.Path)
 	}
 
-	// Create PHP command
-	cmd := exec.CommandContext(ctx, "php", wrapperPath)
-
-	// Set environment variables
-	cmdEnv := os.Environ()
-	for k, v := range env {
-		cmdEnv = append(cmdEnv, k+"="+v)
-	}
-	cmd.Env = cmdEnv
-
-	// Capture output
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// Run the command
-	err = cmd.Run()
-
-	// Get exit code
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
+	// Dump environment variables for debugging (in verbose logging mode)
+	if logger != nil && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
+		var keys []string
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := env[k]
+			logger.Printf("  %s = %s", k, v)
 		}
 	}
 
-	// Combine stdout and stderr for the response
-	output := stdout.Bytes()
-	stderrOutput := stderr.Bytes()
-
-	// Log stderr if not empty
-	if len(stderrOutput) > 0 && logger != nil {
-		logger.Printf("Executor: PHP stderr: %s", string(stderrOutput))
+	// Create FrankenPHP request
+	phpRequest, err := frankenphp.NewRequestWithContext(
+		reqClone, // Use the modified request with the script path
+		frankenphp.WithRequestDocumentRoot(documentRoot, false), // Exact document root
+		frankenphp.WithRequestEnv(env),                          // All environment variables
+	)
+	if err != nil {
+		if logger != nil {
+			logger.Printf("Executor: Error creating PHP request: %v", err)
+		}
+		return nil, 1, fmt.Errorf("failed to create PHP request: %w", err)
 	}
 
-	// Check for PHP errors in the content
-	phpErrorResult := php.CheckErrors(string(output))
+	// Create a recorder to capture the output
+	recorder := httptest.NewRecorder()
 
-	// Look for division by zero errors
-	divisionByZeroErr := strings.Contains(strings.ToLower(string(output))+strings.ToLower(string(stderrOutput)), "division by zero")
+	// Execute the PHP script
+	execErr := frankenphp.ServeHTTP(recorder, phpRequest)
+	if execErr != nil && logger != nil {
+		logger.Printf("Executor: Error executing PHP script: %v", execErr)
+	}
+
+	// Get the response body to check for PHP errors
+	respBody := recorder.Body.Bytes()
+
+	// Check for PHP errors in the content
+	phpErrorResult := php.CheckErrors(string(respBody))
+
+	// Division by zero is a critical error that should always trigger the error handler
+	divisionByZeroErr := strings.Contains(strings.ToLower(string(respBody)), "division by zero")
 	if divisionByZeroErr && phpErrorResult == nil {
 		phpErrorResult = &php.ErrorResult{
 			Type:      php.ErrorFatal,
 			Indicator: "Division by zero error detected",
-			Context:   "PHP detected division by zero in script execution",
+			Context:   "FrankenPHP detected division by zero in script execution",
 		}
 	}
 
+	// Get the status code (default to 0 for success)
+	exitCode := 0
+	if execErr != nil {
+		exitCode = 1
+	}
+
 	// Log output in debug mode
-	if logger != nil && len(output) > 0 && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
-		if len(output) > 200 {
-			logger.Printf("Executor: PHP output (truncated): %s...", string(output[:200]))
+	if logger != nil && len(respBody) > 0 && strings.Contains(os.Getenv("LOG_LEVEL"), "DEBUG") {
+		if len(respBody) > 200 {
+			logger.Printf("Executor: PHP output (truncated): %s...", respBody[:200])
 		} else {
-			logger.Printf("Executor: PHP output: %s", string(output))
+			logger.Printf("Executor: PHP output: %s", respBody)
 		}
 	}
 
 	// Return the combined error if we have PHP errors
 	var resultErr error
-	if err != nil || phpErrorResult != nil {
+	if execErr != nil || phpErrorResult != nil {
 		resultErr = &PHPExecutionError{
-			ExecErr:        err,
+			ExecErr:        execErr,
 			PHPErrorResult: phpErrorResult,
 		}
 	}
 
-	return output, exitCode, resultErr
+	return recorder, exitCode, resultErr
 }
 
 // ensurePhpGlobals ensures that the PHP globals script is installed in the VFS
@@ -320,13 +311,38 @@ func (e *Executor) ensurePhpGlobals(v *vfs.VFS, globalsPath string) error {
 // PHP Globals script for the Go-PHP Executor
 // This script sets up the PHP environment for proper script execution
 
+// Reset the output buffer to ensure clean output
+if (function_exists('ob_get_level') && ob_get_level() > 0) {
+    ob_end_clean();
+}
+ob_start();
+
 // If SCRIPT_DIR is set, change to that directory to ensure includes work properly
-if (isset($_SERVER['SCRIPT_DIR']) && $_SERVER['SCRIPT_DIR'] !== '') {
+if (isset($_SERVER['SCRIPT_DIR']) && $_SERVER['SCRIPT_DIR'] !== '' && isset($_SERVER['FRANGO_DO_CHDIR']) && $_SERVER['FRANGO_DO_CHDIR'] === '1') {
     if (is_dir($_SERVER['SCRIPT_DIR'])) {
         // Change working directory to script directory for proper include resolution
         chdir($_SERVER['SCRIPT_DIR']);
+        
+        // For debugging
+        // error_log("Changed working directory to: " . $_SERVER['SCRIPT_DIR']);
+        // error_log("Current working directory: " . getcwd());
     }
 }
+
+// Define a class to enable overriding __FILE__ and __DIR__ magic constants
+class FrangoConstants {
+    public static function getLogicalFile() {
+        return isset($_SERVER['FRANGO_LOGICAL_FILENAME']) ? $_SERVER['FRANGO_LOGICAL_FILENAME'] : __FILE__;
+    }
+    
+    public static function getLogicalDir() {
+        return isset($_SERVER['FRANGO_LOGICAL_DIR']) ? $_SERVER['FRANGO_LOGICAL_DIR'] : __DIR__;
+    }
+}
+
+// Store the logical file and directory values for external access
+$GLOBALS['FRANGO_LOGICAL_FILE'] = FrangoConstants::getLogicalFile();
+$GLOBALS['FRANGO_LOGICAL_DIR'] = FrangoConstants::getLogicalDir();
 
 // Set up custom error handler to capture fatal errors
 set_error_handler(function($errno, $errstr, $errfile, $errline) {
@@ -349,127 +365,60 @@ set_error_handler(function($errno, $errstr, $errfile, $errline) {
 
 // Merge path parameters into $_GET for compatibility
 if (isset($_SERVER['_PATH']) && $_SERVER['_PATH'] !== '{}') {
-    $pathParams = json_decode($_SERVER['_PATH'], true);
-    if (is_array($pathParams)) {
-        $_GET = array_merge($_GET, $pathParams);
+    $_PATH = json_decode($_SERVER['_PATH'], true);
+    if (is_array($_PATH)) {
+        // Create the $_PATH global for backwards compatibility
+        $GLOBALS['_PATH'] = $_PATH;
+        
+        // Merge path parameters into $_GET (path parameters take precedence)
+        $_GET = array_merge($_GET, $_PATH);
+        
+        // Also update $_REQUEST
+        $_REQUEST = array_merge($_REQUEST, $_PATH);
     }
 }
 
 // Make additional environment data available to the script
 if (isset($_SERVER['_JSON']) && $_SERVER['_JSON'] !== '{}') {
     $_JSON = json_decode($_SERVER['_JSON'], true);
+    $GLOBALS['_JSON'] = $_JSON;
 }
+
+// Helper function to get current logical file path
+if (!function_exists('get_current_script_path')) {
+    function get_current_script_path() {
+        return $GLOBALS['FRANGO_LOGICAL_FILE'];
+    }
+}
+
+// Helper function to get current logical directory path
+if (!function_exists('get_current_script_dir')) {
+    function get_current_script_dir() {
+        return $GLOBALS['FRANGO_LOGICAL_DIR'];
+    }
+}
+
+// Clean up any previous script execution state
+if (function_exists('session_status') && session_status() === PHP_SESSION_ACTIVE) {
+    session_write_close();
+}
+
+// Reset user-defined variables to avoid leaking state between requests
+unset($GLOBALS['_frango_include_state']);
+unset($GLOBALS['_frango_request_state']);
+
+// Register shutdown function to flush output
+register_shutdown_function(function() {
+    if (function_exists('ob_get_level') && ob_get_level() > 0) {
+        while (ob_get_level() > 0) {
+            ob_end_flush();
+        }
+    }
+});
 
 // Load globals from the PHP package
 ` + provider.GetScript()
 
 	// Install the globals script
 	return v.CreateVirtualFile(globalsPath, []byte(globalsScript))
-}
-
-// handleExecutionError processes PHP execution errors and serves error responses
-func (e *Executor) handleExecutionError(w http.ResponseWriter, r *http.Request, err error, statusCode int, scriptPath, originalScriptPath string) {
-	logger := e.config.Logger
-	if logger != nil {
-		logger.Printf("Executor: Handling execution error for '%s': %v (HTTP %d)", scriptPath, err, statusCode)
-	}
-
-	// Extract any structured PHP error if available
-	var phpErr *PHPExecutionError
-	if errors.As(err, &phpErr) && phpErr.PHPErrorResult != nil {
-		// Use the PHP error details for the error response
-		errorDetails := phpErr.PHPErrorResult.Context
-		errorType := phpErr.PHPErrorResult.Type
-
-		// Custom handler logic starts here
-		if e.config.ErrorHandlerPath != "" && errorType != php.ErrorNotice {
-			// Define internal PHP error handling parameters
-			errorHandlingParams := map[string]string{
-				"error_type":      string(errorType),
-				"error_message":   phpErr.PHPErrorResult.Indicator,
-				"error_context":   errorDetails,
-				"script_path":     scriptPath,
-				"original_script": originalScriptPath,
-			}
-
-			// Call error handler PHP script
-			errHandlerReq := r.Clone(r.Context())
-
-			// Format original query for error handler
-			errURL, _ := url.Parse(e.config.ErrorHandlerPath)
-			q := errURL.Query()
-			for k, v := range errorHandlingParams {
-				q.Set(k, v)
-			}
-			errURL.RawQuery = q.Encode()
-
-			// Set the error handler URL
-			errHandlerReq.URL = errURL
-
-			// Execute the error handler script
-			e.Execute(e.vfs, e.config.ErrorHandlerPath, nil, w, errHandlerReq)
-			return
-		}
-
-		// No custom handler or notice-level error - generate a default error response
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(statusCode)
-
-		// Get any PHP stderr output if available
-		phpStderr := ""
-		if phpErr.ExecErr != nil {
-			// Try to extract stderr from the error if it's an exec.ExitError
-			if exitErr, ok := phpErr.ExecErr.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-				phpStderr = string(exitErr.Stderr)
-			}
-		}
-
-		// Format the error in a user-friendly way
-		if e.config.DisplayErrors {
-			// Display detailed error information if enabled
-			errorHTML := fmt.Sprintf(`<!DOCTYPE html>
-<html>
-<head>
-    <title>PHP Error</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        .error-container { border: 1px solid #f44336; padding: 15px; border-radius: 4px; }
-        .error-type { color: #f44336; font-weight: bold; }
-        .error-message { margin: 10px 0; }
-        .error-context { font-family: monospace; background: #f1f1f1; padding: 10px; overflow-x: auto; }
-    </style>
-</head>
-<body>
-    <div class="error-container">
-        <h2 class="error-type">PHP %s Error</h2>
-        <div class="error-message">%s</div>
-        <pre class="error-context">%s</pre>
-    </div>
-</body>
-</html>`, errorType, htmlEscape(phpErr.PHPErrorResult.Indicator),
-				htmlEscape(phpStderr))
-			w.Write([]byte(errorHTML))
-		} else {
-			// Simplified error for production
-			w.Write([]byte("PHP Execution Error. Please check the server logs for details."))
-		}
-		return
-	}
-
-	// For direct executor errors, especially from PHP CLI
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(statusCode)
-
-	// For direct executor errors, check if the error is from PHP command execution
-	if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
-		// Direct output from PHP is most useful for debugging
-		w.Write(exitErr.Stderr)
-	} else {
-		w.Write([]byte("PHP Execution Error: " + err.Error()))
-	}
-}
-
-// htmlEscape escapes HTML special characters
-func htmlEscape(s string) string {
-	return html.EscapeString(s)
 }
