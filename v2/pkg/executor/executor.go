@@ -514,6 +514,7 @@ register_shutdown_function(function() {
     }
 });
 
+?>
 // Load globals from the PHP package
 ` + provider.GetScript()
 

@@ -256,6 +256,7 @@ function template_var($key, $default = null) {
     global $_TEMPLATE;
     return $_TEMPLATE[$key] ?? $default;
 }
+?>
 `
 }
 
@@ -491,4 +492,5 @@ register_shutdown_function(function() {
         }
     }
 });
+?>
 `
