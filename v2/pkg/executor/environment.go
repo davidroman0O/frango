@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -419,4 +420,254 @@ func maskSensitiveValue(value string) string {
 
 	// Show first 4 and last 4 characters only
 	return value[:4] + "****" + value[len(value)-4:]
+}
+
+// setupPhpEnvironment prepares the PHP execution environment
+func (e *Executor) setupPhpEnvironment(requestData *RequestData, scriptPath, resolvedPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) (map[string]string, error) {
+	logger := e.config.Logger
+
+	// Prepare Go-specific environment data
+	goEnvData := e.prepareEnvironmentData(requestData, scriptPath, resolvedPath, renderFn, w, r)
+
+	// Set up document root and script name
+	documentRoot := filepath.Dir(resolvedPath)
+	originalScriptName := "/" + filepath.Base(scriptPath)
+
+	if logger != nil {
+		logger.Printf("Executor: Setup paths - DocumentRoot='%s', ScriptName='%s'",
+			documentRoot, originalScriptName)
+	}
+
+	// Build PHP environment variables
+	phpEnv := e.buildPhpEnvironment(requestData, goEnvData, resolvedPath, documentRoot, originalScriptName, r)
+
+	// Add additional environment variables
+	e.addScriptEnvironment(phpEnv, resolvedPath, scriptPath)
+
+	// Log environment variables in debug mode
+	e.logEnvironmentVariables(phpEnv)
+
+	return phpEnv, nil
+}
+
+// addScriptEnvironment adds script-specific environment variables
+func (e *Executor) addScriptEnvironment(phpEnv map[string]string, resolvedPath, scriptPath string) {
+	// Add globals file path
+	globalsFile := "/_frango_php_globals.php"
+	phpEnv["PHP_GLOBALS_FILE"] = globalsFile
+
+	// Set auto_prepend_file for globals
+	globalsFilePath := filepath.Join(e.vfs.GetTempDir(), strings.TrimPrefix(globalsFile, "/"))
+	phpEnv["auto_prepend_file"] = globalsFilePath
+
+	// Add script directory for includes
+	scriptDir := filepath.Dir(resolvedPath)
+	phpEnv["SCRIPT_DIR"] = scriptDir
+
+	// Add logical filename and dirname for __FILE__ and __DIR__
+	phpEnv["FRANGO_LOGICAL_FILENAME"] = resolvedPath
+	phpEnv["FRANGO_LOGICAL_DIR"] = scriptDir
+
+	// Add environment variable for chdir
+	phpEnv["FRANGO_DO_CHDIR"] = "1"
+}
+
+// extractPathParams extracts path parameters from a URL pattern and actual path
+func (e *Executor) extractPathParams(pattern, path string) map[string]string {
+	// Extract HTTP method if pattern includes it
+	patternPath := pattern
+	if parts := strings.SplitN(pattern, " ", 2); len(parts) > 1 {
+		patternPath = parts[1]
+	}
+
+	// Special case for patterns with multiple parameters in the same segment
+	if strings.Contains(patternPath, "}-{") {
+		return e.extractMultipleParamsPerSegment(patternPath, path)
+	}
+
+	// Check if pattern contains a catchall parameter
+	if e.containsCatchAllParam(patternPath) {
+		return e.extractCatchAllParams(patternPath, path)
+	}
+
+	// Split pattern and path into segments
+	patternSegments := strings.Split(strings.Trim(patternPath, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(path, "/"), "/")
+
+	// Create parameters map
+	params := make(map[string]string)
+
+	// Handle empty parameter case
+	if len(pathSegments) == len(patternSegments)-1 &&
+		len(patternSegments) > 0 &&
+		strings.HasPrefix(patternSegments[len(patternSegments)-1], "{") &&
+		strings.HasSuffix(patternSegments[len(patternSegments)-1], "}") {
+		paramName := patternSegments[len(patternSegments)-1][1 : len(patternSegments[len(patternSegments)-1])-1]
+		params[paramName] = ""
+		return params
+	}
+
+	// Standard case: extract parameters from matching segments
+	maxSegments := len(patternSegments)
+	if maxSegments > len(pathSegments) {
+		maxSegments = len(pathSegments)
+	}
+
+	// Extract parameters from matching segments
+	for i := 0; i < maxSegments; i++ {
+		patternSegment := patternSegments[i]
+		pathSegment := pathSegments[i]
+
+		// Check for parameter pattern {name}
+		if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
+			// Extract parameter name without braces
+			paramName := patternSegment[1 : len(patternSegment)-1]
+
+			// Handle special case for catchall params with asterisk
+			if strings.HasPrefix(paramName, "*") {
+				paramName = paramName[1:] // Remove the asterisk
+			}
+
+			if paramName != "" {
+				params[paramName] = pathSegment
+			}
+		} else if patternSegment != pathSegment {
+			// Non-parameter segments must match exactly
+			return nil
+		}
+	}
+
+	return params
+}
+
+// containsCatchAllParam checks if the pattern contains a catchall parameter
+func (e *Executor) containsCatchAllParam(pattern string) bool {
+	// Check for catchall syntax with asterisk
+	if strings.Contains(pattern, "{*") {
+		return true
+	}
+
+	// Skip the check if the pattern contains multiple parameters
+	if strings.Count(pattern, "{") > 1 || strings.Count(pattern, "}") > 1 {
+		return false
+	}
+
+	// This is only for patterns like /path/{param}
+	// Where the parameter is the last segment
+	patternSegments := strings.Split(strings.Trim(pattern, "/"), "/")
+	for i, segment := range patternSegments {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			// If the parameter is not the last segment, it's not a catchall
+			if i < len(patternSegments)-1 {
+				return false
+			}
+			// This is a parameter at the end of the pattern
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractCatchAllParams extracts parameters for catchall patterns
+func (e *Executor) extractCatchAllParams(pattern, path string) map[string]string {
+	patternSegments := strings.Split(strings.Trim(pattern, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(path, "/"), "/")
+
+	// Validate segments count
+	if len(patternSegments) < 1 || len(pathSegments) < len(patternSegments)-1 {
+		return nil
+	}
+
+	// Check if all non-parameter segments match
+	for i := 0; i < len(patternSegments)-1; i++ {
+		if !strings.HasPrefix(patternSegments[i], "{") || !strings.HasSuffix(patternSegments[i], "}") {
+			if patternSegments[i] != pathSegments[i] {
+				return nil
+			}
+		}
+	}
+
+	// Extract the last parameter
+	lastSegment := patternSegments[len(patternSegments)-1]
+	if strings.HasPrefix(lastSegment, "{") && strings.HasSuffix(lastSegment, "}") {
+		paramName := lastSegment[1 : len(lastSegment)-1]
+
+		// Handle special case for catchall params with asterisk
+		if strings.HasPrefix(paramName, "*") {
+			paramName = paramName[1:] // Remove the asterisk
+		}
+
+		// Capture all remaining path segments
+		remainingPath := strings.Join(pathSegments[len(patternSegments)-1:], "/")
+
+		params := make(map[string]string)
+		params[paramName] = remainingPath
+		return params
+	}
+
+	return nil
+}
+
+// extractMultipleParamsPerSegment handles extraction of multiple parameters in the same segment
+func (e *Executor) extractMultipleParamsPerSegment(pattern, path string) map[string]string {
+	// Split pattern and path into segments
+	patternSegments := strings.Split(strings.Trim(pattern, "/"), "/")
+	pathSegments := strings.Split(strings.Trim(path, "/"), "/")
+
+	// Basic validation - must have same number of segments
+	if len(patternSegments) != len(pathSegments) {
+		return nil
+	}
+
+	params := make(map[string]string)
+
+	// First, check all regular segments (those without multiple params)
+	for i, patternSegment := range patternSegments {
+		// Skip segments with multiple parameters for now
+		if strings.Contains(patternSegment, "}-{") {
+			continue
+		}
+
+		// Handle regular parameter segments
+		if strings.HasPrefix(patternSegment, "{") && strings.HasSuffix(patternSegment, "}") {
+			paramName := patternSegment[1 : len(patternSegment)-1]
+			if paramName != "" {
+				params[paramName] = pathSegments[i]
+			}
+		} else if patternSegment != pathSegments[i] {
+			// Non-parameter segments must match exactly
+			return nil
+		}
+	}
+
+	// Now handle segments with multiple parameters
+	for i, patternSegment := range patternSegments {
+		if strings.Contains(patternSegment, "}-{") {
+			// Process the segment and extract parameter names
+			parts := strings.Split(patternSegment, "}-{")
+
+			// Simple handling for segments like {param1}-{param2}-{param3}
+			if len(parts) >= 2 && strings.Count(pathSegments[i], "-") == len(parts)-1 {
+				values := strings.Split(pathSegments[i], "-")
+
+				for j, part := range parts {
+					paramName := ""
+					if j == 0 && strings.HasPrefix(part, "{") {
+						paramName = part[1:]
+					} else if j == len(parts)-1 && strings.HasSuffix(part, "}") {
+						paramName = part[:len(part)-1]
+					} else {
+						paramName = part
+					}
+
+					if paramName != "" && j < len(values) {
+						params[paramName] = values[j]
+					}
+				}
+			}
+		}
+	}
+
+	return params
 }
