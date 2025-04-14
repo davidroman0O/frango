@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -99,7 +98,7 @@ func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData,
 	}
 
 	// Execute PHP script
-	recorder, exitCode, execErr := e.executeScript(r.Context(), resolvedPath, phpEnv, r)
+	recorder, exitCode, execErr := executePhpWithRecorder(r.Context(), resolvedPath, phpEnv, r, e.config.Logger)
 
 	// Handle errors if any
 	err = e.CheckPHPErrors(w, r, execErr, exitCode, recorder.Body.Bytes(), scriptPath, resolvedPath)
@@ -164,11 +163,6 @@ func (e *Executor) prepareRequest(vfs *vfs.VFS, scriptPath string, renderFn Rend
 	}
 
 	return requestData, resolvedPath, nil
-}
-
-// executeScript runs the PHP script using FrankenPHP
-func (e *Executor) executeScript(ctx context.Context, scriptPath string, env map[string]string, r *http.Request) (*httptest.ResponseRecorder, int, error) {
-	return executePhpWithRecorder(ctx, scriptPath, env, r, e.config.Logger)
 }
 
 // sendResponse sends the PHP script response to the client
