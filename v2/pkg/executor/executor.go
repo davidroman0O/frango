@@ -1,10 +1,13 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +21,12 @@ type Config struct {
 	DevelopmentMode  bool
 	DisplayErrors    bool
 	ErrorHandlerPath string
+
+	// Auto-reload specific config passed from Middleware
+	EnableAutoReload        bool
+	AutoReloadScriptContent string
+	AutoReloadPagePath      string // The virtual path of the main script being executed
+	AutoReloadDevServerPort int    // Port of the separate dev server (0 if not used)
 }
 
 // Executor handles the execution of PHP scripts.
@@ -68,7 +77,8 @@ func NewExecutor(config Config, vfs *vfs.VFS) *Executor {
 }
 
 // Execute runs a PHP script using the provided VFS and request context.
-func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) {
+// The renderFn should have the signature: func(w http.ResponseWriter, r *http.Request) map[string]interface{}
+func (e *Executor) Execute(vfs *vfs.VFS, scriptPath string, renderFn func(w http.ResponseWriter, r *http.Request) map[string]interface{}, w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	logger := e.config.Logger
 	e.vfs = vfs
@@ -133,7 +143,7 @@ func (e *Executor) initializeExecution(vfs *vfs.VFS) error {
 }
 
 // prepareRequest extracts request data and resolves the script path
-func (e *Executor) prepareRequest(vfs *vfs.VFS, scriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) (*RequestData, string, error) {
+func (e *Executor) prepareRequest(vfs *vfs.VFS, scriptPath string, renderFn func(w http.ResponseWriter, r *http.Request) map[string]interface{}, w http.ResponseWriter, r *http.Request) (*RequestData, string, error) {
 	logger := e.config.Logger
 
 	// Extract relevant data from the HTTP request
@@ -170,9 +180,41 @@ func (e *Executor) sendResponse(w http.ResponseWriter, recorder *httptest.Respon
 	logger := e.config.Logger
 
 	if logger != nil {
-		logger.Printf("Executor: PHP script executed successfully (Exit Code: %d). Copying response with %d bytes and HTTP status %d.",
-			exitCode, len(recorder.Body.Bytes()), recorder.Code)
+		logger.Printf("Executor: PHP script executed successfully (Exit Code: %d). Preparing response (Status: %d, Size: %d bytes).",
+			exitCode, recorder.Code, recorder.Body.Len())
 	}
+
+	// Get content type and body bytes from recorder
+	contentType := recorder.Header().Get("Content-Type")
+	bodyBytes := recorder.Body.Bytes()
+
+	// --- Inject Auto-Reload Script if enabled and content is HTML ---
+	if e.config.EnableAutoReload && strings.Contains(strings.ToLower(contentType), "text/html") {
+		// Use AutoReloadPagePath from config (which is the original scriptPath passed to ExecuteWithExecutor)
+		pagePathForInjection := e.config.AutoReloadPagePath
+		if e.config.AutoReloadScriptContent != "" && pagePathForInjection != "" {
+			originalLen := len(bodyBytes)
+			// Pass the page path to inject function
+			bodyBytes = e.injectAutoReloadScript(bodyBytes, e.config.AutoReloadScriptContent, pagePathForInjection)
+			newLen := len(bodyBytes)
+			if newLen != originalLen {
+				if logger != nil {
+					logger.Printf("Executor: Injected auto-reload script (%d bytes added). Updating Content-Length.", newLen-originalLen)
+				}
+				// Update Content-Length header
+				recorder.Header().Set("Content-Length", strconv.Itoa(newLen))
+				// Delete ETag as content has changed
+				recorder.Header().Del("ETag")
+			} else if logger != nil {
+				logger.Println("Executor: Auto-reload script injection did not modify content length.")
+			}
+		} else if logger != nil {
+			logger.Println("Executor: Auto-reload enabled but script content is empty, skipping injection.")
+		}
+	} else if e.config.EnableAutoReload && logger != nil {
+		logger.Printf("Executor: Auto-reload enabled but content-type ('%s') is not HTML, skipping injection.", contentType)
+	}
+	// --- End Auto-Reload Script Injection ---
 
 	// Copy all headers from the recorder
 	for key, values := range recorder.Header() {
@@ -184,9 +226,73 @@ func (e *Executor) sendResponse(w http.ResponseWriter, recorder *httptest.Respon
 	// Set the status code
 	w.WriteHeader(recorder.Code)
 
-	// Write the body content
-	_, writeErr := w.Write(recorder.Body.Bytes())
+	// Write the potentially modified body content
+	_, writeErr := w.Write(bodyBytes)
 	if writeErr != nil && logger != nil {
-		logger.Printf("Executor: Error writing PHP output to response writer for %s: %v", scriptPath, writeErr)
+		logger.Printf("Executor: Error writing final output to response writer for %s: %v", scriptPath, writeErr)
 	}
 }
+
+// injectAutoReloadScript injects the auto-reload script into HTML content,
+// replacing the path and dev server port placeholders.
+func (e *Executor) injectAutoReloadScript(content []byte, scriptTemplate string, pagePath string) []byte {
+	if scriptTemplate == "" || pagePath == "" {
+		e.config.Logger.Println("Executor: injectAutoReloadScript returning early - empty template or pagePath.")
+		return content
+	}
+
+	// Define placeholders
+	pathPlaceholder := "%%SCRIPT_PATH%%"
+	devPortPlaceholder := "%%DEV_SERVER_PORT%%"
+	devPortStr := strconv.Itoa(e.config.AutoReloadDevServerPort)
+
+	e.config.Logger.Printf("Executor: injectAutoReloadScript called. PagePath: '%s', DevPort: %s", pagePath, devPortStr)
+	if !strings.Contains(scriptTemplate, pathPlaceholder) {
+		e.config.Logger.Printf("Executor: WARNING - scriptTemplate does NOT contain placeholder '%s'!", pathPlaceholder)
+	}
+	if !strings.Contains(scriptTemplate, devPortPlaceholder) {
+		e.config.Logger.Printf("Executor: WARNING - scriptTemplate does NOT contain placeholder '%s'!", devPortPlaceholder)
+	}
+
+	// Perform replacements
+	interimScript := strings.Replace(scriptTemplate, pathPlaceholder, pagePath, 1)
+	finalScript := strings.Replace(interimScript, devPortPlaceholder, devPortStr, 1)
+
+	if finalScript == scriptTemplate {
+		e.config.Logger.Printf("Executor: WARNING - strings.Replace did not modify the script template. Placeholders found? path=%t, port=%t",
+			strings.Contains(scriptTemplate, pathPlaceholder), strings.Contains(scriptTemplate, devPortPlaceholder))
+	} else {
+		e.config.Logger.Printf("Executor: Placeholders replaced. Path: '%s', Port: '%s'.", pagePath, devPortStr)
+	}
+
+	scriptBytes := []byte(finalScript)
+
+	// Try to inject before closing </body> tag
+	bodyTagLower := []byte("</body>")
+	if idx := bytes.LastIndex(bytes.ToLower(content), bodyTagLower); idx != -1 {
+		// Create a new slice with enough capacity
+		newContent := make([]byte, 0, len(content)+len(scriptBytes))
+		newContent = append(newContent, content[:idx]...)
+		newContent = append(newContent, scriptBytes...)
+		newContent = append(newContent, content[idx:]...)
+		return newContent
+	}
+
+	// If </body> not found, try before </head>
+	headTagLower := []byte("</head>")
+	if idx := bytes.LastIndex(bytes.ToLower(content), headTagLower); idx != -1 {
+		newContent := make([]byte, 0, len(content)+len(scriptBytes))
+		newContent = append(newContent, content[:idx]...)
+		newContent = append(newContent, scriptBytes...)
+		newContent = append(newContent, content[idx:]...)
+		return newContent
+	}
+
+	// If neither found, simply append to the end (less ideal)
+	if e.config.Logger != nil {
+		e.config.Logger.Println("Executor: Could not find </body> or </head> tag for script injection, appending to end.")
+	}
+	return append(content, scriptBytes...)
+}
+
+// setupPhpEnvironment prepares the PHP environment variables and data.

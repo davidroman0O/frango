@@ -12,7 +12,7 @@ import (
 
 // prepareEnvironmentData extracts and prepares all environment data needed for PHP execution.
 // It aggregates data from the request, config, and potentially render functions.
-func (e *Executor) prepareEnvironmentData(requestData *RequestData, scriptPath, physicalScriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) map[string]string {
+func (e *Executor) prepareEnvironmentData(requestData *RequestData, scriptPath, physicalScriptPath string, renderFn func(w http.ResponseWriter, r *http.Request) map[string]interface{}, w http.ResponseWriter, r *http.Request) map[string]string {
 	envData := make(map[string]string)
 	config := e.config
 	logger := config.Logger
@@ -144,7 +144,7 @@ func (e *Executor) addStandardPHPFiles(fileUploads map[string][]*multipart.FileH
 }
 
 // addTemplateVariables adds template variables to environment data
-func (e *Executor) addTemplateVariables(renderFn RenderData, w http.ResponseWriter, r *http.Request, envData map[string]string) {
+func (e *Executor) addTemplateVariables(renderFn func(w http.ResponseWriter, r *http.Request) map[string]interface{}, w http.ResponseWriter, r *http.Request, envData map[string]string) {
 	logger := e.config.Logger
 
 	if logger != nil {
@@ -423,7 +423,7 @@ func maskSensitiveValue(value string) string {
 }
 
 // setupPhpEnvironment prepares the PHP execution environment
-func (e *Executor) setupPhpEnvironment(requestData *RequestData, scriptPath, resolvedPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) (map[string]string, error) {
+func (e *Executor) setupPhpEnvironment(requestData *RequestData, scriptPath, resolvedPath string, renderFn func(w http.ResponseWriter, r *http.Request) map[string]interface{}, w http.ResponseWriter, r *http.Request) (map[string]string, error) {
 	logger := e.config.Logger
 
 	// Prepare Go-specific environment data

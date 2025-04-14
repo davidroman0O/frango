@@ -18,6 +18,9 @@ var sidePHP embed.FS
 func main() {
 	php, err := frango.New(
 		frango.WithDevelopmentMode(true),
+		frango.WithDevServer(frango.DevServerConfig{
+			Port: 8081,
+		}),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create Frango instance: %v", err)

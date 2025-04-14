@@ -195,6 +195,7 @@ func (w *GlobalWatcher) checkAllFiles() {
 				// If we found a virtual path, notify file change handlers
 				if virtualPath != "" {
 					// Call the notification outside of the lock
+					vfs.logger.Printf("Watcher: Detected hash change for %s, triggering notifyFileChanged", filePath)
 					vfs.notifyFileChanged(virtualPath, filePath, "modified")
 				}
 			}

@@ -1,15 +1,19 @@
 package frango
 
 import (
+	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/davidroman0O/frango/v2/internal/utils"
 	"github.com/davidroman0O/frango/v2/pkg/executor"
@@ -29,6 +33,17 @@ type Middleware struct {
 	vfsCreateLock      sync.Mutex  // Lock for creating new VFS instances
 	errorHandlerPath   string      // Path to custom PHP error handler script
 	displayErrors      bool        // Whether to display PHP errors in the output
+
+	// Auto-reload related fields
+	enableAutoReload        bool            // Whether auto-reload is enabled
+	autoReloadTrigger       string          // Mechanism: "sse", "polling", "ws" (ws not fully implemented yet)
+	autoReloadScript        string          // Custom JS script content (overrides trigger-based)
+	autoReloadScriptContent string          // The actual JS script content to inject
+	reloadHub               *ReloadEventHub // Hub for managing client connections
+
+	// Dev Server config (used if WithDevServer is called)
+	devServerConfig *DevServerConfig // Configuration for the separate dev server
+	devServer       *http.Server     // Instance of the running dev server (if configured)
 }
 
 // Option is a function that configures the middleware
@@ -40,6 +55,51 @@ type RenderData func(w http.ResponseWriter, r *http.Request) map[string]interfac
 // ContextKey is used for request context values
 type ContextKey string
 
+// --- Default Auto-Reload Scripts ---
+// (Moved from vfs_autoreload.go)
+
+const defaultSSEReloadScript = "\n<script>\n(function() {\n    let isReloading = false; // Flag to indicate intentional reload\n\n    // Injected by server - MUST match the placeholder in executor.injectAutoReloadScript\n    const frangoScriptPath = '%%SCRIPT_PATH%%';\n    const frangoDevServerPort = parseInt('%%DEV_SERVER_PORT%%', 10); // 0 if not using dev server\n\n    if (!frangoScriptPath || frangoScriptPath === '%%SCRIPT_PATH%%') {\n         console.error('[Frango Reload] Script path placeholder not replaced, cannot connect.');\n         return;\n    }\n\n    const encodedPath = encodeURIComponent(frangoScriptPath);\n    let eventSourceUrl;\n\n    if (frangoDevServerPort > 0) {\n        // Construct URL for separate dev server\n        // Note: Using backticks for JS template literal requires careful escaping in Go string\n        eventSourceUrl = `http://${window.location.hostname}:${frangoDevServerPort}/_/frango/SSE?page=${encodedPath}`;\n        console.log('[Frango Reload] Connecting SSE to Dev Server:', eventSourceUrl);\n    } else {\n        // Construct relative URL for main server\n        eventSourceUrl = '/_/frango/SSE?page=' + encodedPath;\n        console.log('[Frango Reload] Connecting SSE to Main Server:', eventSourceUrl);\n    }\n\n\n    const eventSource = new EventSource(eventSourceUrl);\n\n    eventSource.addEventListener('fileChange', (event) => {\n        // Server already filtered, just check it's a modification event\n        try {\n            const data = JSON.parse(event.data);\n            console.log('[Frango Reload] File change event received:', data);\n            // Reload if the server sent a modification event (server ensures it's relevant)\n            if (data.event === 'modified') {\n                 console.log('[Frango Reload] Reloading page...');\n                 isReloading = true; // Set flag before reloading\n                 window.location.reload();\n            }\n        } catch (e) {\n             console.error('[Frango Reload] Error parsing message:', e, 'Raw data:', event.data);\n        }\n    });\n\n    eventSource.onerror = (error) => {\n        // If we initiated the reload, the connection closing is expected\n        if (isReloading) {\n            console.log('[Frango Reload] Reloading, connection closed as expected.');\n            return; // Don't log error or try to close\n        }\n        console.error('[Frango Reload] EventSource error:', error, 'URL:', eventSourceUrl);\n        eventSource.close(); // Close on unexpected errors\n        console.log('[Frango Reload] SSE connection closed due to error.');\n    };\n\n    eventSource.onopen = () => {\n        console.log('[Frango Reload] SSE Connected for page:', frangoScriptPath, 'to:', eventSourceUrl);\n    };\n\n})();\n</script>\n"
+
+const defaultPollingReloadScript = `
+<script>
+(function() {
+    let lastUpdate = Date.now();
+    function checkForUpdates() {
+        fetch('/_frango_reload_poll?last=' + lastUpdate)
+            .then(response => {
+                if (!response.ok) throw new Error('Poll request failed');
+                return response.json();
+            })
+            .then(data => {
+                if (data.hasChanges) {
+                    console.log('[Frango Reload] Changes detected, reloading page...');
+                    window.location.reload();
+                } else {
+                    lastUpdate = data.timestamp;
+                    setTimeout(checkForUpdates, 1000); // Poll every second
+                }
+            })
+            .catch(error => {
+                console.error('[Frango Reload] Polling error:', error);
+                setTimeout(checkForUpdates, 5000); // Retry after 5 seconds on error
+            });
+    }
+    console.log('[Frango Reload] Polling Started.');
+    checkForUpdates();
+})();
+</script>
+`
+
+// TODO: Implement WebSocket auto-reload script if needed
+const defaultWebSocketReloadScript = `
+<script>
+console.warn('[Frango Reload] WebSocket reload not fully implemented yet.');
+// WebSocket implementation would go here
+</script>
+`
+
+// --- End Default Scripts ---
+
 // New creates a new Frango PHP middleware instance
 func New(opts ...Option) (*Middleware, error) {
 	// Default configuration
@@ -47,19 +107,68 @@ func New(opts ...Option) (*Middleware, error) {
 		tempDir:            os.TempDir(),
 		logger:             log.New(os.Stderr, "[frango] ", log.LstdFlags),
 		blockDirectPHPURLs: true,
-		developmentMode:    true, // Default to development mode
+		developmentMode:    true, // Default to development mode ON
+		// Default auto-reload settings (will be adjusted based on developmentMode later)
+		enableAutoReload:  true,
+		autoReloadTrigger: "sse", // Default trigger
 	}
 
-	// Apply all options
+	// Apply all options provided by the user
 	for _, opt := range opts {
 		opt(m)
 	}
 
-	// Set default values that depend on other options
-	if m.displayErrors == false && m.developmentMode {
-		// In development mode, display errors by default
-		m.displayErrors = true
+	// --- Adjust defaults based on other settings ---
+	// If not in development mode, auto-reload is forced off unless explicitly enabled
+	if !m.developmentMode && m.enableAutoReload {
+		// If dev mode is off, but user explicitly said WithAutoReload(true), keep it.
+		// Otherwise, disable it.
+		// NOTE: Checking for explicit options is complex. Current logic:
+		// If developmentMode=false, enableAutoReload defaults to false.
+		// User must set BOTH WithDevelopmentMode(false) AND WithAutoReload(true)
+		// for auto-reload to be active in non-dev mode (uncommon case).
+		// We'll simplify and just disable it if dev mode is off, unless the user explicitly enabled it.
+		// Let's refine this logic slightly: If dev mode is false, auto-reload is disabled by default.
+		// The Option func WithAutoReload(true) can override this.
+		// We need to check if WithAutoReload was set AFTER the default was established.
+
+		// Reset based on dev mode first
+		if !m.developmentMode {
+			m.enableAutoReload = false
+		}
+		// Re-apply options to allow override
+		for _, opt := range opts {
+			opt(m)
+		}
+
+	} else if m.developmentMode {
+		// If dev mode is ON, auto-reload is ON by default.
+		// User could have explicitly set it to false via WithAutoReload(false).
+		// The apply loop already handled this.
 	}
+
+	// Display errors defaults to true only if in development mode
+	if m.developmentMode {
+		// Check if user explicitly set it using WithDisplayErrors
+		displayErrorsSet := false
+		// Create a temporary middleware with defaults to check option effects
+		checkM := &Middleware{displayErrors: false} // Start with explicit false
+		for _, opt := range opts {
+			opt(checkM)
+			// If the option changed the value from the default false, it was set
+			if checkM.displayErrors {
+				displayErrorsSet = true
+				break
+			}
+		}
+		if !displayErrorsSet {
+			m.displayErrors = true // Default to true in dev mode if not explicitly set by user
+		}
+	} else {
+		// Default to false in production mode (unless explicitly set true)
+		// The apply loop already handled explicit setting.
+	}
+	// --- End Adjust defaults ---
 
 	// Create a unique temp dir for this instance
 	instanceTempDir := filepath.Join(m.tempDir, "frango-"+utils.GenerateUniqueID())
@@ -67,35 +176,123 @@ func New(opts ...Option) (*Middleware, error) {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	m.tempDir = instanceTempDir
+	m.logger.Printf("Using temp directory: %s", m.tempDir)
 
-	// CRITICAL: Initialize FrankenPHP just once at middleware creation
-	// This ensures a single PHP process is available for all requests
+	// Initialize FrankenPHP
 	m.initLock.Lock()
-	defer m.initLock.Unlock()
-
-	// TODO: leverage `WithWorkers(fileName string, num int, env map[string]string) Option`
-	// TODO: leverage `WithNumThreads(num int) Option`
-	// TODO: add options
 	if !m.initialized {
 		m.logger.Println("Initializing FrankenPHP...")
+		// TODO: Allow configuring FrankenPHP options (num threads, workers, etc.)
 		if err := frankenphp.Init(frankenphp.WithNumThreads(3)); err != nil {
+			m.initLock.Unlock()
 			return nil, fmt.Errorf("error initializing FrankenPHP: %w", err)
 		}
 		m.initialized = true
 		m.logger.Println("FrankenPHP initialized successfully")
 	}
+	m.initLock.Unlock()
 
 	// Create initial root VFS
+	// Use a separate lock for VFS creation/access
 	m.vfsCreateLock.Lock()
-	defer m.vfsCreateLock.Unlock()
-
-	var err error
-	m.rootVFS, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create root VFS: %w", err)
+	var vfsErr error
+	m.rootVFS, vfsErr = vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     m.tempDir,
+		Logger:      m.logger,
+		DevelopMode: m.developmentMode, // Pass dev mode to VFS for its own checks if needed
+		// Note: AutoReload specific configs are removed from VFSConfig
+	})
+	m.vfsCreateLock.Unlock() // Unlock after VFS creation
+	if vfsErr != nil {
+		// Attempt cleanup even if VFS creation failed partially
+		m.Shutdown() // Call shutdown to clean up FrankenPHP and temp dir
+		return nil, fmt.Errorf("failed to create root VFS: %w", vfsErr)
 	}
 
+	// --- Setup Auto-Reload ---
+	if m.enableAutoReload {
+		m.logger.Printf("Auto-reload enabled (Trigger: %s)", m.getReloadTriggerType())
+
+		// Determine the script content
+		if m.autoReloadScript != "" {
+			m.autoReloadScriptContent = m.autoReloadScript
+			m.logger.Println("Using custom auto-reload script.")
+		} else {
+			switch m.getReloadTriggerType() {
+			case "websocket", "ws":
+				m.autoReloadScriptContent = defaultWebSocketReloadScript
+			case "polling", "poll":
+				m.autoReloadScriptContent = defaultPollingReloadScript
+			default: // "sse" or any unknown value
+				m.autoReloadScriptContent = defaultSSEReloadScript
+			}
+		}
+
+		// Initialize the event hub
+		m.reloadHub = NewReloadEventHub(m.logger)
+
+		// Register VFS change handler to broadcast events
+		// Ensure rootVFS is not nil before adding handler
+		if m.rootVFS != nil {
+			m.rootVFS.AddChangeHandler(func(event vfs.FileChangeEvent) {
+				if m.reloadHub != nil {
+					m.reloadHub.BroadcastFileChange(event)
+				}
+			})
+			m.logger.Println("Registered VFS change handler for auto-reload broadcasting.")
+		} else {
+			m.logger.Println("Warning: Root VFS is nil, cannot register change handler for auto-reload.")
+			// Proceed without broadcast functionality, user needs to add files first
+		}
+
+		// --- Start Dev Server if configured ---
+		if m.devServerConfig != nil {
+			m.logger.Printf("Starting internal auto-reload dev server on port %d", m.devServerConfig.Port)
+			devMux := http.NewServeMux()
+			// Ensure reloadHub is available before registering handler
+			if m.reloadHub != nil {
+				devMux.HandleFunc("/_/frango/SSE", m.SSEReloadHandler) // Use the new path
+			} else {
+				m.logger.Println("Error: Reload hub not initialized, cannot register SSE handler for dev server.")
+				// Maybe return an error here?
+			}
+
+			// Create and store the http.Server instance
+			devAddr := fmt.Sprintf(":%d", m.devServerConfig.Port)
+			m.devServer = &http.Server{
+				Addr:    devAddr,
+				Handler: enableCORS(devMux),
+				// TODO: Add timeouts (ReadTimeout, WriteTimeout, IdleTimeout) for robustness
+			}
+
+			// Start the server in a goroutine
+			go func() {
+				m.logger.Printf("Auto-reload dev server listening on %s", devAddr)
+				if err := m.devServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					m.logger.Printf("Error starting or running auto-reload dev server: %v", err)
+				}
+			}()
+		} else if m.enableAutoReload && m.getReloadTriggerType() == "sse" {
+			// If auto-reload is enabled with SSE but no dev server, log a reminder
+			// Note: Path updated here too for consistency in messaging, though registration is external.
+			m.logger.Println("Auto-reload with SSE enabled, but no dev server. Ensure '/_/frango/SSE' route is registered on the main application mux.")
+		}
+		// --- End Start Dev Server ---
+
+	} else {
+		m.logger.Println("Auto-reload disabled.")
+	}
+	// --- End Setup Auto-Reload ---
+
 	return m, nil
+}
+
+// getReloadTriggerType returns the normalized reload trigger type
+func (m *Middleware) getReloadTriggerType() string {
+	if m.autoReloadTrigger == "" {
+		return "sse" // Default to SSE
+	}
+	return strings.ToLower(m.autoReloadTrigger)
 }
 
 // TempDir returns the temporary directory used by the middleware
@@ -112,6 +309,21 @@ func (m *Middleware) Shutdown() {
 	if m.rootVFS != nil {
 		m.rootVFS.Cleanup()
 		m.rootVFS = nil
+	}
+
+	// Shut down the auto-reload dev server if it's running
+	if m.devServer != nil {
+		m.logger.Println("Shutting down auto-reload dev server...")
+		// Create a context with a timeout for shutdown
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 5-second timeout
+		defer cancel()
+
+		if err := m.devServer.Shutdown(ctx); err != nil {
+			m.logger.Printf("Error during auto-reload dev server shutdown: %v", err)
+		} else {
+			m.logger.Println("Auto-reload dev server shut down gracefully.")
+		}
+		m.devServer = nil // Clear the reference
 	}
 
 	// CRITICAL: Properly shut down FrankenPHP
@@ -509,35 +721,352 @@ func (m *Middleware) resolveScriptPath(scriptPath string) string {
 
 // ExecuteWithExecutor handles execution of a PHP script through the VFS using the executor module.
 func (m *Middleware) ExecuteWithExecutor(vfs *vfs.VFS, scriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) {
+	// Ensure scriptPath is normalized if needed before passing
+	normalizedScriptPath := normalizePath(scriptPath)
+
+	// Determine the dev server port (0 if not configured)
+	devServerPort := 0
+	if m.devServerConfig != nil {
+		devServerPort = m.devServerConfig.Port
+	}
+
 	// Create an executor instance with the current middleware configuration
-	exec := executor.NewExecutor(executor.Config{
+	execConfig := executor.Config{
 		Logger:           m.logger,
 		DevelopmentMode:  m.developmentMode,
 		DisplayErrors:    m.displayErrors,
 		ErrorHandlerPath: m.errorHandlerPath,
-	}, vfs)
-
-	// Log execution start
-	m.logger.Printf("========== EXECUTING PHP SCRIPT WITH EXECUTOR ==========")
-	m.logger.Printf("ExecuteWithExecutor: Executing script '%s' with VFS %s", scriptPath, vfs.GetName())
-	m.logger.Printf("ExecuteWithExecutor: HTTP Request %s %s", r.Method, r.URL.String())
-
-	// The ensurePhpGlobals method in the executor already handles this,
-	// so we don't need to call php.UpdateVFS separately
-
-	// Execute the PHP script using the executor
-	// Use type conversion to match the executor's RenderData type
-	execRenderFn := func(w http.ResponseWriter, r *http.Request) map[string]interface{} {
-		if renderFn == nil {
-			return nil
-		}
-		return renderFn(w, r)
+		// Pass auto-reload config
+		EnableAutoReload:        m.enableAutoReload,
+		AutoReloadScriptContent: m.autoReloadScriptContent, // The JS template
+		AutoReloadPagePath:      normalizedScriptPath,      // Pass the normalized script path
+		AutoReloadDevServerPort: devServerPort,             // Pass the dev server port (0 if not used)
 	}
 
-	exec.Execute(vfs, scriptPath, execRenderFn, w, r)
+	exec := executor.NewExecutor(execConfig, vfs)
 
-	m.logger.Printf("========== PHP EXECUTION COMPLETE ==========")
+	// Use the executor to run the script
+	exec.Execute(vfs, normalizedScriptPath, renderFn, w, r)
+}
+
+// --- Reload Event Hub (SSE Server-Side Filter Version) ---
+
+// HubClientSSE stores information about a connected SSE client
+type HubClientSSE struct {
+	channel  chan string // Channel for sending messages to this client
+	pagePath string      // The script path this client initially loaded
+}
+
+// ReloadEventHub manages connected clients for auto-reload functionality
+type ReloadEventHub struct {
+	// Use map from channel to the client struct for easy lookup/removal
+	sseClients      map[chan string]*HubClientSSE
+	sseClientsMutex sync.RWMutex
+
+	register   chan *HubClientSSE       // Channel for new clients
+	unregister chan *HubClientSSE       // Channel for clients leaving
+	broadcast  chan vfs.FileChangeEvent // Channel for file change events from VFS
+
+	// Polling related fields (kept for consistency)
+	lastChangeTime int64
+	changesMutex   sync.RWMutex
+
+	logger *log.Logger
+}
+
+// NewReloadEventHub creates a new event hub
+func NewReloadEventHub(logger *log.Logger) *ReloadEventHub {
+	hub := &ReloadEventHub{
+		sseClients:     make(map[chan string]*HubClientSSE),
+		register:       make(chan *HubClientSSE),
+		unregister:     make(chan *HubClientSSE),
+		broadcast:      make(chan vfs.FileChangeEvent, 10), // Buffered broadcast channel
+		lastChangeTime: time.Now().UnixNano() / int64(time.Millisecond),
+		logger:         logger,
+	}
+	go hub.runSSE() // Start the hub's processing loop
+	return hub
+}
+
+// runSSE starts the hub's main loop for handling SSE client registration,
+// unregistration, and filtered broadcasts.
+func (h *ReloadEventHub) runSSE() {
+	for {
+		select {
+		case client := <-h.register:
+			h.sseClientsMutex.Lock()
+			h.sseClients[client.channel] = client
+			h.logger.Printf("Reload Hub (SSE): Client registered for page %s. Total: %d", client.pagePath, len(h.sseClients))
+			h.sseClientsMutex.Unlock()
+
+		case client := <-h.unregister:
+			h.sseClientsMutex.Lock()
+			if currentClient, ok := h.sseClients[client.channel]; ok {
+				// Check if it's the same client instance trying to unregister
+				if currentClient == client { // Avoid race condition if channel was reused somehow
+					pagePath := client.pagePath // Get page path before deleting
+					delete(h.sseClients, client.channel)
+					// Don't close the channel here, let SSEReloadHandler's defer handle it
+					// close(client.channel)
+					h.logger.Printf("Reload Hub (SSE): Client unregistered for page %s. Total: %d", pagePath, len(h.sseClients))
+				}
+			}
+			h.sseClientsMutex.Unlock()
+
+		case event := <-h.broadcast:
+			// Update last change time for potential polling clients
+			h.changesMutex.Lock()
+			h.lastChangeTime = time.Now().UnixNano() / int64(time.Millisecond)
+			h.changesMutex.Unlock()
+
+			// Format event data once
+			eventData := map[string]interface{}{
+				"event": "modified",   // Keep event name consistent for client
+				"type":  "fileChange", // Keep type consistent for client
+				"path":  event.VirtualPath,
+				"time":  event.EventTime.Format(time.RFC3339),
+			}
+			jsonData, err := json.Marshal(eventData)
+			if err != nil {
+				h.logger.Printf("Reload Hub (SSE): Error marshalling event data: %v", err)
+				continue // Skip broadcast if marshalling fails
+			}
+
+			// Format SSE message once
+			sseMessage := fmt.Sprintf("event: fileChange\ndata: %s\n\n", jsonData)
+
+			// Send filtered messages (read lock allows concurrent reads)
+			h.sseClientsMutex.RLock()
+			h.logger.Printf("Reload Hub (SSE): Processing broadcast for event on %s (%s)", event.VirtualPath, event.ChangeType)
+
+			clientsToRemove := []chan string{} // Collect slow/closed clients
+			for channel, client := range h.sseClients {
+				// *** FILTERING LOGIC ***
+				// Reload if the changed file matches the page the client loaded
+				// TODO: Add more sophisticated filtering (e.g., for global CSS/JS, includes?)
+				if event.VirtualPath == client.pagePath {
+					h.logger.Printf("Reload Hub (SSE): Match found! Sending update for %s to client for page %s", event.VirtualPath, client.pagePath)
+					// Use non-blocking send with timeout
+					select {
+					case channel <- sseMessage:
+						// Successfully sent
+					case <-time.After(250 * time.Millisecond): // Increased timeout slightly
+						h.logger.Printf("Reload Hub (SSE): Client send timeout for page %s, queueing for removal.", client.pagePath)
+						clientsToRemove = append(clientsToRemove, channel)
+					}
+				}
+			}
+			h.sseClientsMutex.RUnlock()
+
+			// Remove slow/closed clients (needs write lock)
+			if len(clientsToRemove) > 0 {
+				h.sseClientsMutex.Lock()
+				for _, channel := range clientsToRemove {
+					if client, ok := h.sseClients[channel]; ok {
+						pagePath := client.pagePath // Get path for logging
+						delete(h.sseClients, channel)
+						close(channel) // Close the channel to signal the SSEReloadHandler's loop
+						h.logger.Printf("Reload Hub (SSE): Removed slow/closed client for page %s.", pagePath)
+					}
+				}
+				h.logger.Printf("Reload Hub (SSE): Clients after cleanup: %d", len(h.sseClients))
+				h.sseClientsMutex.Unlock()
+			}
+		}
+	}
+}
+
+// BroadcastFileChange sends a file change event to the hub's broadcast channel
+func (h *ReloadEventHub) BroadcastFileChange(event vfs.FileChangeEvent) {
+	select {
+	case h.broadcast <- event:
+		h.logger.Printf("Reload Hub: Queued event for %s (%s)", event.VirtualPath, event.ChangeType)
+	default:
+		h.logger.Printf("Reload Hub: Broadcast channel full, dropping event for %s (%s)", event.VirtualPath, event.ChangeType)
+	}
+}
+
+// SSEReloadHandler handles Server-Sent Events connections for auto-reload
+func (m *Middleware) SSEReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if m.reloadHub == nil || !m.enableAutoReload {
+		http.Error(w, "Auto-reload not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// --- Get Page Path from Query Param ---
+	pageQuery := r.URL.Query().Get("page")
+	if pageQuery == "" {
+		m.logger.Println("Reload Hub (SSE): Connection rejected. Missing 'page' query parameter.")
+		http.Error(w, "Missing 'page' query parameter", http.StatusBadRequest)
+		return
+	}
+	// Use the normalization function
+	pagePath := normalizePath(pageQuery)
+	m.logger.Printf("Reload Hub (SSE): Connection attempt for page: %s", pagePath)
+	// --- End Get Page Path ---
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*") // Consider restricting
+
+	// Create client channel and struct
+	clientChan := make(chan string, 10) // Buffered channel
+	client := &HubClientSSE{
+		channel:  clientChan,
+		pagePath: pagePath,
+	}
+
+	// Register client with the hub
+	m.reloadHub.register <- client
+
+	// Unregister when handler exits
+	defer func() {
+		m.reloadHub.unregister <- client
+		// The channel is closed by the hub.runSSE() when unregistering or on timeout
+	}()
+
+	// Send initial connected message
+	fmt.Fprintf(w, "event: connected\ndata: {\"time\": \"%s\"}\n\n", time.Now().Format(time.RFC3339))
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done(): // Client disconnected
+			m.logger.Printf("Reload Hub (SSE): Client disconnected for page %s.", client.pagePath)
+			return
+		case msg, ok := <-clientChan:
+			if !ok { // Channel closed by hub (likely due to send timeout/cleanup or unregister)
+				m.logger.Printf("Reload Hub (SSE): Hub closed channel for page %s.", client.pagePath)
+				return
+			}
+			_, err := fmt.Fprint(w, msg)
+			if err != nil {
+				m.logger.Printf("Reload Hub (SSE): Error writing to client for page %s: %v", client.pagePath, err)
+				return // Error writing, likely client disconnected
+			}
+			flusher.Flush() // Flush the message to the client
+		}
+	}
+}
+
+// PollingReloadHandler handles polling requests for file changes
+func (m *Middleware) PollingReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if m.reloadHub == nil || !m.enableAutoReload {
+		http.Error(w, "Auto-reload not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*") // Consider restricting
+
+	lastParam := r.URL.Query().Get("last")
+	var lastClientCheck int64
+	if lastParam != "" {
+		lastClientCheck, _ = strconv.ParseInt(lastParam, 10, 64) // Ignore error, defaults to 0
+	}
+
+	m.reloadHub.changesMutex.RLock()
+	lastChangeTime := m.reloadHub.lastChangeTime
+	m.reloadHub.changesMutex.RUnlock()
+
+	currentTime := time.Now().UnixNano() / int64(time.Millisecond)
+	hasChanges := lastClientCheck > 0 && lastChangeTime > lastClientCheck
+
+	response := map[string]interface{}{
+		"timestamp":  currentTime,
+		"hasChanges": hasChanges,
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		m.logger.Printf("Reload Hub: Error encoding polling response: %v", err)
+	}
+}
+
+// --- End Reload Event Hub ---
+
+// --- Auto-Reload Route Registration ---
+
+// RegisterReloadRoutes registers the necessary HTTP endpoints for auto-reload
+// with the provided ServeMux or router.
+func (m *Middleware) RegisterReloadRoutes(mux *http.ServeMux) {
+	if !m.enableAutoReload {
+		m.logger.Println("Auto-reload disabled, skipping route registration.")
+		return
+	}
+
+	if mux == nil {
+		m.logger.Println("Error: Cannot register reload routes, provided mux is nil.")
+		return
+	}
+
+	trigger := m.getReloadTriggerType()
+	m.logger.Printf("Registering auto-reload routes (Trigger: %s)", trigger)
+
+	if trigger == "sse" || trigger == "websocket" { // Assuming WS might use SSE endpoint initially
+		mux.HandleFunc("/_/frango/SSE", m.SSEReloadHandler)
+		m.logger.Println("Registered SSE handler at /_/frango/SSE")
+	}
+	// TODO: Add WebSocket handler registration when implemented
+	// if trigger == "websocket" {
+	//  mux.HandleFunc("/_frango_reload_ws", m.WebSocketReloadHandler)
+	// }
+	if trigger == "polling" {
+		mux.HandleFunc("/_frango_reload_poll", m.PollingReloadHandler)
+		m.logger.Println("Registered Polling handler at /_frango_reload_poll")
+	}
+}
+
+// Helper function (ensure it's defined)
+func normalizePath(path string) string {
+	if path == "" || path == "." {
+		return "/"
+	}
+	// Ensure path starts with /
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	// Replace backslashes with forward slashes
+	path = strings.ReplaceAll(path, "\\", "/")
+	// Clean the path (removes ., .., merges //)
+	// Use path package for consistent forward slashes
+	cleanedPath := filepath.Clean(path)
+	// Important: filepath.Clean might return "." if input is just "/", handle this
+	if cleanedPath == "." {
+		return "/"
+	}
+	// Ensure it still starts with / after cleaning
+	if !strings.HasPrefix(cleanedPath, "/") {
+		cleanedPath = "/" + cleanedPath
+	}
+	return cleanedPath
 }
 
 // phpContextKey is a custom type for context keys
 type phpContextKey string
+
+// enableCORS wraps a handler with basic CORS headers for development.
+// Allows requests from any origin.
+func enableCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow any origin
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		h.ServeHTTP(w, r)
+	})
+}

@@ -39,7 +39,7 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	// Store mappings
 	v.sourceMappings[virtualPath] = sourcePath
 	v.fileOrigins[virtualPath] = OriginSource
-	v.fileHashes[virtualPath] = FileHash{
+	v.fileHashes[sourcePath] = FileHash{
 		Hash:      hash,
 		Timestamp: time.Now(),
 	}
@@ -56,6 +56,7 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 		GetGlobalWatcher().RegisterFile(v, sourcePath)
 
 		// Notify file added event
+		v.logger.Printf("AddSourceFile: Triggering notifyFileChanged(added) for %s", virtualPath)
 		v.notifyFileChanged(virtualPath, sourcePath, "added")
 	} else {
 		// Update path cache

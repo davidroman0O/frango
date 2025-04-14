@@ -136,12 +136,8 @@ type VFSConfig struct {
 	// GlobalsProvider provides global PHP variables
 	GlobalsProvider GlobalsProvider
 
-	// EnableAutoReload determines whether files should be automatically reloaded when changes are detected
-	// Only has effect when DevelopMode is true
-	EnableAutoReload bool
-
-	// Auto-reload options
-	AutoReloadInterval time.Duration // How often to check for file changes
-	AutoReloadScript   string        // Custom JavaScript to inject for auto-reload
-	AutoReloadTrigger  string        // Reload trigger mechanism: "websocket", "sse", "polling"
+	// NOTE: Auto-reload configuration fields (EnableAutoReload, AutoReloadInterval,
+	// AutoReloadScript, AutoReloadTrigger) have been removed from VFSConfig.
+	// This configuration is now handled by the main `frango.Middleware`.
+	// The VFS only needs `DevelopMode` to know whether to enable file watching.
 }

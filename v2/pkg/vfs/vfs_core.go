@@ -75,7 +75,7 @@ func NewVFSWithConfig(config VFSConfig) (*VFS, error) {
 	}
 
 	// Start file watching if in develop mode
-	if v.developMode && config.EnableAutoReload {
+	if v.developMode {
 		v.startWatching()
 	}
 

@@ -39,9 +39,8 @@ func (v *VFS) notifyFileChanged(virtualPath, physicalPath, changeType string) {
 	v.handlerMutex.RUnlock()
 
 	// Call all handlers
+	v.logger.Printf("Notify: Sending '%s' event for %s (Physical: %s) to %d handlers", changeType, virtualPath, physicalPath, len(handlers))
 	for _, handler := range handlers {
 		handler(event)
 	}
-
-	v.logger.Printf("Notified %d handlers of %s for file: %s", len(handlers), changeType, virtualPath)
 }
