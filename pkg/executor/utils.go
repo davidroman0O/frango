@@ -1,0 +1,84 @@
+package executor
+
+import (
+	"encoding/base64"
+	"log"
+	"net"
+	"sort"
+	"strings"
+
+	"github.com/davidroman0O/frango/pkg/php"
+	"github.com/davidroman0O/frango/pkg/vfs"
+)
+
+// calculateScriptPathHash generates a hash for a given script path.
+// Used for creating unique temporary file names.
+func calculateScriptPathHash(scriptPath string) string {
+	return php.CalculatePathHash(scriptPath)
+}
+
+// getMapKeys returns a sorted list of keys from a map[string]interface{}.
+// Useful for logging or consistent iteration.
+func getMapKeys(m map[string]interface{}) []string {
+	if m == nil {
+		return []string{}
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// extractQueryString extracts the query string part from a full URL.
+func extractQueryString(fullURL string) string {
+	queryIndex := strings.Index(fullURL, "?")
+	if queryIndex != -1 {
+		return fullURL[queryIndex+1:]
+	}
+	return ""
+}
+
+// extractHostOnly extracts the host part from a remote address with format "host:port".
+func extractHostOnly(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// If splitting fails, it might be just a host without a port
+		return remoteAddr
+	}
+	return host
+}
+
+// extractPortOnly extracts the port part from a remote address with format "host:port".
+func extractPortOnly(remoteAddr string) string {
+	_, port, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// If splitting fails, assume default port based on context
+		return ""
+	}
+	return port
+}
+
+// encodeBase64URL encodes a string using Base64 URL encoding
+func encodeBase64URL(s string) string {
+	return base64.URLEncoding.EncodeToString([]byte(s))
+}
+
+// decodeBase64URL decodes a Base64 URL encoded string
+func decodeBase64URL(s string) (string, error) {
+	decoded, err := base64.URLEncoding.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+// createTestVFS creates a new VFS instance for tests using the v2 API
+func createTestVFS(tempDir string, logger *log.Logger, developMode bool) (*vfs.VFS, error) {
+	return vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: developMode,
+	})
+}

@@ -1,18 +1,13 @@
 package frango
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/fs"
+	"html"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,1591 +15,1058 @@ import (
 	"sync"
 	"time"
 
+	"github.com/davidroman0O/frango/internal/utils"
+	"github.com/davidroman0O/frango/pkg/executor"
+	"github.com/davidroman0O/frango/pkg/vfs"
 	"github.com/dunglas/frankenphp"
 )
 
-// --- PHP Utility Scripts ---
-
-// pathUtilityScript is the PHP code that defines the $_PATH superglobal
-// and related utilities that make route parameters more accessible.
-const pathUtilityScript = `<?php
-/**
- * Frango utility script that defines the $_PATH superglobal
- * 
- * This is automatically included in PHP environments to provide
- * a clean interface for accessing path parameters.
- */
-
-// Initialize the $_PATH superglobal
-global $_PATH;
-$_PATH = [];
-
-// Scan $_SERVER for path parameters (old format for backward compatibility)
-foreach ($_SERVER as $key => $value) {
-    if (strpos($key, 'FRANGO_PARAM_') === 0) {
-        $paramName = substr($key, 13); // Remove 'FRANGO_PARAM_' prefix
-        $_PATH[$paramName] = $value;
-    }
-}
-
-// Scan for the new format with serialized path parameters
-if (isset($_SERVER['FRANGO_PATH_PARAMS_JSON']) && !empty($_SERVER['FRANGO_PATH_PARAMS_JSON'])) {
-    $pathParams = json_decode($_SERVER['FRANGO_PATH_PARAMS_JSON'], true);
-    if (is_array($pathParams)) {
-        $_PATH = array_merge($_PATH, $pathParams);
-    }
-}
-
-// Define a helper function to get path segments as an array
-function path_segments() {
-    $segments = [];
-    
-    // Extract from FRANGO_URL_SEGMENT_ variables
-    $count = isset($_SERVER['FRANGO_URL_SEGMENT_COUNT']) ? (int)$_SERVER['FRANGO_URL_SEGMENT_COUNT'] : 0;
-    
-    for ($i = 0; $i < $count; $i++) {
-        $key = 'FRANGO_URL_SEGMENT_' . $i;
-        if (isset($_SERVER[$key])) {
-            $segments[] = $_SERVER[$key];
-        }
-    }
-    
-    return $segments;
-}
-
-// Make segments available as $_PATH_SEGMENTS
-global $_PATH_SEGMENTS;
-$_PATH_SEGMENTS = path_segments();
-`
-
-// --- Core Types (Exported) ---
-
-// Middleware is the core PHP execution engine.
-// It does not handle routing itself but provides http.Handler instances for integration.
+// Middleware is the core Frango PHP middleware for Go applications
 type Middleware struct {
-	sourceDir          string // Resolved absolute path to user's PHP source files
-	tempDir            string // Base temporary directory for this instance
-	logger             *log.Logger
-	initialized        bool
-	initLock           sync.Mutex
-	developmentMode    bool
-	blockDirectPHPURLs bool              // Whether to block direct .php access in URLs
-	envCache           *environmentCache // Internal cache for PHP environments
+	tempDir            string      // Base temporary directory
+	logger             *log.Logger // Logger for operations
+	initialized        bool        // Whether the middleware has been initialized
+	initLock           sync.Mutex  // Lock for initialization
+	developmentMode    bool        // Whether to enable development mode with file watching
+	blockDirectPHPURLs bool        // Whether to block direct .php URLs
+	rootVFS            *vfs.VFS    // Root VFS containing shared files
+	vfsCreateLock      sync.Mutex  // Lock for creating new VFS instances
+	errorHandlerPath   string      // Path to custom PHP error handler script
+	displayErrors      bool        // Whether to display PHP errors in the output
+
+	// Auto-reload related fields
+	enableAutoReload        bool            // Whether auto-reload is enabled
+	autoReloadTrigger       string          // Mechanism: "sse", "polling", "ws" (ws not fully implemented yet)
+	autoReloadScript        string          // Custom JS script content (overrides trigger-based)
+	autoReloadScriptContent string          // The actual JS script content to inject
+	reloadHub               *ReloadEventHub // Hub for managing client connections
+
+	// Dev Server config (used if WithDevServer is called)
+	devServerConfig *DevServerConfig // Configuration for the separate dev server
+	devServer       *http.Server     // Instance of the running dev server (if configured)
 }
 
-// Option is a function that configures a Middleware.
+// Option is a function that configures the middleware
 type Option func(*Middleware)
 
-// RenderData is a function that returns data to be passed to a PHP template.
-// It's used with RenderHandlerFor.
+// RenderData is a function that provides template data to a PHP script
 type RenderData func(w http.ResponseWriter, r *http.Request) map[string]interface{}
 
-// RequestData contains all relevant information extracted from an HTTP request
-type RequestData struct {
-	Method       string
-	FullURL      string
-	Path         string
-	RemoteAddr   string
-	Headers      http.Header
-	QueryParams  url.Values
-	PathSegments []string // URL path split by "/"
-	JSONBody     map[string]interface{}
-	FormData     url.Values
-}
+// ContextKey is used for request context values
+type ContextKey string
 
-// --- Constructor (Exported) ---
+// --- Default Auto-Reload Scripts ---
+// (Moved from vfs_autoreload.go)
 
-// New creates a new PHP middleware instance (execution engine).
+const defaultSSEReloadScript = "\n<script>\n(function() {\n    let isReloading = false; // Flag to indicate intentional reload\n\n    // Injected by server - MUST match the placeholder in executor.injectAutoReloadScript\n    const frangoScriptPath = '%%SCRIPT_PATH%%';\n    const frangoDevServerPort = parseInt('%%DEV_SERVER_PORT%%', 10); // 0 if not using dev server\n\n    if (!frangoScriptPath || frangoScriptPath === '%%SCRIPT_PATH%%') {\n         console.error('[Frango Reload] Script path placeholder not replaced, cannot connect.');\n         return;\n    }\n\n    const encodedPath = encodeURIComponent(frangoScriptPath);\n    let eventSourceUrl;\n\n    if (frangoDevServerPort > 0) {\n        // Construct URL for separate dev server\n        // Note: Using backticks for JS template literal requires careful escaping in Go string\n        eventSourceUrl = `http://${window.location.hostname}:${frangoDevServerPort}/_/frango/SSE?page=${encodedPath}`;\n        console.log('[Frango Reload] Connecting SSE to Dev Server:', eventSourceUrl);\n    } else {\n        // Construct relative URL for main server\n        eventSourceUrl = '/_/frango/SSE?page=' + encodedPath;\n        console.log('[Frango Reload] Connecting SSE to Main Server:', eventSourceUrl);\n    }\n\n\n    const eventSource = new EventSource(eventSourceUrl);\n\n    eventSource.addEventListener('fileChange', (event) => {\n        // Server already filtered, just check it's a modification event\n        try {\n            const data = JSON.parse(event.data);\n            console.log('[Frango Reload] File change event received:', data);\n            // Reload if the server sent a modification event (server ensures it's relevant)\n            if (data.event === 'modified') {\n                 console.log('[Frango Reload] Reloading page...');\n                 isReloading = true; // Set flag before reloading\n                 window.location.reload();\n            }\n        } catch (e) {\n             console.error('[Frango Reload] Error parsing message:', e, 'Raw data:', event.data);\n        }\n    });\n\n    eventSource.onerror = (error) => {\n        // If we initiated the reload, the connection closing is expected\n        if (isReloading) {\n            console.log('[Frango Reload] Reloading, connection closed as expected.');\n            return; // Don't log error or try to close\n        }\n        console.error('[Frango Reload] EventSource error:', error, 'URL:', eventSourceUrl);\n        eventSource.close(); // Close on unexpected errors\n        console.log('[Frango Reload] SSE connection closed due to error.');\n    };\n\n    eventSource.onopen = () => {\n        console.log('[Frango Reload] SSE Connected for page:', frangoScriptPath, 'to:', eventSourceUrl);\n    };\n\n})();\n</script>\n"
+
+const defaultPollingReloadScript = `
+<script>
+(function() {
+    let lastUpdate = Date.now();
+    function checkForUpdates() {
+        fetch('/_frango_reload_poll?last=' + lastUpdate)
+            .then(response => {
+                if (!response.ok) throw new Error('Poll request failed');
+                return response.json();
+            })
+            .then(data => {
+                if (data.hasChanges) {
+                    console.log('[Frango Reload] Changes detected, reloading page...');
+                    window.location.reload();
+                } else {
+                    lastUpdate = data.timestamp;
+                    setTimeout(checkForUpdates, 1000); // Poll every second
+                }
+            })
+            .catch(error => {
+                console.error('[Frango Reload] Polling error:', error);
+                setTimeout(checkForUpdates, 5000); // Retry after 5 seconds on error
+            });
+    }
+    console.log('[Frango Reload] Polling Started.');
+    checkForUpdates();
+})();
+</script>
+`
+
+// TODO: Implement WebSocket auto-reload script if needed
+const defaultWebSocketReloadScript = `
+<script>
+console.warn('[Frango Reload] WebSocket reload not fully implemented yet.');
+// WebSocket implementation would go here
+</script>
+`
+
+// --- End Default Scripts ---
+
+// New creates a new Frango PHP middleware instance
 func New(opts ...Option) (*Middleware, error) {
 	// Default configuration
 	m := &Middleware{
-		developmentMode:    true,
-		blockDirectPHPURLs: true, // Default to blocking direct PHP access in URLs
-		logger:             log.New(os.Stdout, "[frango] ", log.LstdFlags),
+		tempDir:            os.TempDir(),
+		logger:             log.New(os.Stderr, "[frango] ", log.LstdFlags),
+		blockDirectPHPURLs: true,
+		developmentMode:    true, // Default to development mode ON
+		// Default auto-reload settings (will be adjusted based on developmentMode later)
+		enableAutoReload:  true,
+		autoReloadTrigger: "sse", // Default trigger
 	}
 
-	// Apply options
+	// Apply all options provided by the user
 	for _, opt := range opts {
 		opt(m)
 	}
 
-	// Resolve source directory (optional, can be empty)
-	var absSourceDir string
-	var err error
-	if m.sourceDir == "" {
-		// Create a minimal temp dir if no source provided (for embeds/cache)
-		absSourceDir, err = os.MkdirTemp("", "frango-nosource-")
-		if err != nil {
-			return nil, fmt.Errorf("error creating temporary source directory: %w", err)
+	// --- Adjust defaults based on other settings ---
+	// If not in development mode, auto-reload is forced off unless explicitly enabled
+	if !m.developmentMode && m.enableAutoReload {
+		// If dev mode is off, but user explicitly said WithAutoReload(true), keep it.
+		// Otherwise, disable it.
+		// NOTE: Checking for explicit options is complex. Current logic:
+		// If developmentMode=false, enableAutoReload defaults to false.
+		// User must set BOTH WithDevelopmentMode(false) AND WithAutoReload(true)
+		// for auto-reload to be active in non-dev mode (uncommon case).
+		// We'll simplify and just disable it if dev mode is off, unless the user explicitly enabled it.
+		// Let's refine this logic slightly: If dev mode is false, auto-reload is disabled by default.
+		// The Option func WithAutoReload(true) can override this.
+		// We need to check if WithAutoReload was set AFTER the default was established.
+
+		// Reset based on dev mode first
+		if !m.developmentMode {
+			m.enableAutoReload = false
 		}
-		m.logger.Printf("No SourceDir provided, using temp dir: %s", absSourceDir)
+		// Re-apply options to allow override
+		for _, opt := range opts {
+			opt(m)
+		}
+
+	} else if m.developmentMode {
+		// If dev mode is ON, auto-reload is ON by default.
+		// User could have explicitly set it to false via WithAutoReload(false).
+		// The apply loop already handled this.
+	}
+
+	// Display errors defaults to true only if in development mode
+	if m.developmentMode {
+		// Check if user explicitly set it using WithDisplayErrors
+		displayErrorsSet := false
+		// Create a temporary middleware with defaults to check option effects
+		checkM := &Middleware{displayErrors: false} // Start with explicit false
+		for _, opt := range opts {
+			opt(checkM)
+			// If the option changed the value from the default false, it was set
+			if checkM.displayErrors {
+				displayErrorsSet = true
+				break
+			}
+		}
+		if !displayErrorsSet {
+			m.displayErrors = true // Default to true in dev mode if not explicitly set by user
+		}
 	} else {
-		absSourceDir, err = resolveDirectory(m.sourceDir)
-		if err != nil {
-			return nil, fmt.Errorf("error resolving source directory: %w", err)
+		// Default to false in production mode (unless explicitly set true)
+		// The apply loop already handled explicit setting.
+	}
+	// --- End Adjust defaults ---
+
+	// Create a unique temp dir for this instance
+	instanceTempDir := filepath.Join(m.tempDir, "frango-"+utils.GenerateUniqueID())
+	if err := os.MkdirAll(instanceTempDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	m.tempDir = instanceTempDir
+	m.logger.Printf("Using temp directory: %s", m.tempDir)
+
+	// Initialize FrankenPHP
+	m.initLock.Lock()
+	if !m.initialized {
+		m.logger.Println("Initializing FrankenPHP...")
+		// TODO: Allow configuring FrankenPHP options (num threads, workers, etc.)
+		if err := frankenphp.Init(frankenphp.WithNumThreads(3)); err != nil {
+			m.initLock.Unlock()
+			return nil, fmt.Errorf("error initializing FrankenPHP: %w", err)
 		}
+		m.initialized = true
+		m.logger.Println("FrankenPHP initialized successfully")
 	}
-	m.sourceDir = absSourceDir
+	m.initLock.Unlock()
 
-	// Create base temporary directory for environments and embeds
-	tempDir, err := os.MkdirTemp("", "frango-instance-")
-	if err != nil {
-		return nil, fmt.Errorf("error creating base temporary directory: %w", err)
+	// Create initial root VFS
+	// Use a separate lock for VFS creation/access
+	m.vfsCreateLock.Lock()
+	var vfsErr error
+	m.rootVFS, vfsErr = vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     m.tempDir,
+		Logger:      m.logger,
+		DevelopMode: m.developmentMode, // Pass dev mode to VFS for its own checks if needed
+		// Note: AutoReload specific configs are removed from VFSConfig
+	})
+	m.vfsCreateLock.Unlock() // Unlock after VFS creation
+	if vfsErr != nil {
+		// Attempt cleanup even if VFS creation failed partially
+		m.Shutdown() // Call shutdown to clean up FrankenPHP and temp dir
+		return nil, fmt.Errorf("failed to create root VFS: %w", vfsErr)
 	}
-	m.tempDir = tempDir
 
-	// Create dedicated subdirectory for embedded files
-	embedTempDir := filepath.Join(m.tempDir, "_frango_embeds")
-	if err := os.MkdirAll(embedTempDir, 0755); err != nil {
-		os.RemoveAll(m.tempDir) // Cleanup base temp dir
-		return nil, fmt.Errorf("error creating embeds temp directory: %w", err)
+	// --- Setup Auto-Reload ---
+	if m.enableAutoReload {
+		m.logger.Printf("Auto-reload enabled (Trigger: %s)", m.getReloadTriggerType())
+
+		// Determine the script content
+		if m.autoReloadScript != "" {
+			m.autoReloadScriptContent = m.autoReloadScript
+			m.logger.Println("Using custom auto-reload script.")
+		} else {
+			switch m.getReloadTriggerType() {
+			case "websocket", "ws":
+				m.autoReloadScriptContent = defaultWebSocketReloadScript
+			case "polling", "poll":
+				m.autoReloadScriptContent = defaultPollingReloadScript
+			default: // "sse" or any unknown value
+				m.autoReloadScriptContent = defaultSSEReloadScript
+			}
+		}
+
+		// Initialize the event hub
+		m.reloadHub = NewReloadEventHub(m.logger)
+
+		// Register VFS change handler to broadcast events
+		// Ensure rootVFS is not nil before adding handler
+		if m.rootVFS != nil {
+			m.rootVFS.AddChangeHandler(func(event vfs.FileChangeEvent) {
+				if m.reloadHub != nil {
+					m.reloadHub.BroadcastFileChange(event)
+				}
+			})
+			m.logger.Println("Registered VFS change handler for auto-reload broadcasting.")
+		} else {
+			m.logger.Println("Warning: Root VFS is nil, cannot register change handler for auto-reload.")
+			// Proceed without broadcast functionality, user needs to add files first
+		}
+
+		// --- Start Dev Server if configured ---
+		if m.devServerConfig != nil {
+			m.logger.Printf("Starting internal auto-reload dev server on port %d", m.devServerConfig.Port)
+			devMux := http.NewServeMux()
+			// Ensure reloadHub is available before registering handler
+			if m.reloadHub != nil {
+				devMux.HandleFunc("/_/frango/SSE", m.SSEReloadHandler) // Use the new path
+			} else {
+				m.logger.Println("Error: Reload hub not initialized, cannot register SSE handler for dev server.")
+				// Maybe return an error here?
+			}
+
+			// Create and store the http.Server instance
+			devAddr := fmt.Sprintf(":%d", m.devServerConfig.Port)
+			m.devServer = &http.Server{
+				Addr:    devAddr,
+				Handler: enableCORS(devMux),
+				// TODO: Add timeouts (ReadTimeout, WriteTimeout, IdleTimeout) for robustness
+			}
+
+			// Start the server in a goroutine
+			go func() {
+				m.logger.Printf("Auto-reload dev server listening on %s", devAddr)
+				if err := m.devServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					m.logger.Printf("Error starting or running auto-reload dev server: %v", err)
+				}
+			}()
+		} else if m.enableAutoReload && m.getReloadTriggerType() == "sse" {
+			// If auto-reload is enabled with SSE but no dev server, log a reminder
+			// Note: Path updated here too for consistency in messaging, though registration is external.
+			m.logger.Println("Auto-reload with SSE enabled, but no dev server. Ensure '/_/frango/SSE' route is registered on the main application mux.")
+		}
+		// --- End Start Dev Server ---
+
+	} else {
+		m.logger.Println("Auto-reload disabled.")
 	}
-
-	// Create environment cache
-	m.envCache = newEnvironmentCache(m.sourceDir, m.tempDir, m.logger, m.developmentMode)
+	// --- End Setup Auto-Reload ---
 
 	return m, nil
 }
 
-// --- Public Methods (Exported) ---
+// getReloadTriggerType returns the normalized reload trigger type
+func (m *Middleware) getReloadTriggerType() string {
+	if m.autoReloadTrigger == "" {
+		return "sse" // Default to SSE
+	}
+	return strings.ToLower(m.autoReloadTrigger)
+}
 
-// Shutdown cleans up resources (environments, temp files).
+// TempDir returns the temporary directory used by the middleware
+func (m *Middleware) TempDir() string {
+	return m.tempDir
+}
+
+// Shutdown cleans up resources used by the middleware
 func (m *Middleware) Shutdown() {
+	m.initLock.Lock()
+	defer m.initLock.Unlock()
+
+	// Clean up the root VFS if it exists
+	if m.rootVFS != nil {
+		m.rootVFS.Cleanup()
+		m.rootVFS = nil
+	}
+
+	// Shut down the auto-reload dev server if it's running
+	if m.devServer != nil {
+		m.logger.Println("Shutting down auto-reload dev server...")
+		// Create a context with a timeout for shutdown
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // 5-second timeout
+		defer cancel()
+
+		if err := m.devServer.Shutdown(ctx); err != nil {
+			m.logger.Printf("Error during auto-reload dev server shutdown: %v", err)
+		} else {
+			m.logger.Println("Auto-reload dev server shut down gracefully.")
+		}
+		m.devServer = nil // Clear the reference
+	}
+
+	// CRITICAL: Properly shut down FrankenPHP
+	// Must be done once after we're done with the middleware
 	if m.initialized {
 		frankenphp.Shutdown()
 		m.initialized = false
 	}
-	if m.envCache != nil {
-		m.envCache.Cleanup()
-	}
-	// Remove the base temp directory for this instance
-	if err := os.RemoveAll(m.tempDir); err != nil {
-		m.logger.Printf("Warning: Failed to remove base temp directory %s: %v", m.tempDir, err)
+
+	// Clean up the temp directory
+	if m.tempDir != "" && m.tempDir != os.TempDir() {
+		m.logger.Printf("Cleaning up temp directory: %s", m.tempDir)
+		if err := os.RemoveAll(m.tempDir); err != nil {
+			m.logger.Printf("Error removing temp directory: %v", err)
+		}
 	}
 }
 
-// For returns an http.Handler that executes a PHP script.
-// scriptPath can be relative to the SourceDir or an absolute path.
-// The pattern is automatically extracted from the request.
-func (m *Middleware) For(scriptPath string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Resolve script path immediately if relative
-		absScriptPath := m.resolveScriptPath(scriptPath)
-
-		// Block direct PHP access in URLs if enabled
-		if m.blockDirectPHPURLs && strings.HasSuffix(strings.ToLower(r.URL.Path), ".php") {
-			// Get registered pattern from context if available
-			registeredUrlPattern := r.URL.Path
-			patternKey := php12PatternContextKey(r.Context())
-			if patternKey != "" {
-				// Extract the pattern part without method
-				if parts := strings.SplitN(patternKey, " ", 2); len(parts) > 1 {
-					registeredUrlPattern = parts[1]
-				} else {
-					registeredUrlPattern = patternKey
-				}
-			}
-
-			// Special case: If this is explicitly the script we're serving, allow it
-			baseScript := filepath.Base(scriptPath)
-			if registeredUrlPattern == "/"+baseScript {
-				m.logger.Printf("Allowing explicitly registered PHP path: %s", registeredUrlPattern)
-			} else {
-				m.logger.Printf("Blocked direct access to PHP file in URL: %s", r.URL.Path)
-				http.Error(w, "Not Found: Direct PHP file access is not allowed", http.StatusNotFound)
-				return
-			}
-		}
-
-		// Initialization check
-		if !m.ensureInitialized(r.Context()) {
-			http.Error(w, "PHP initialization error", http.StatusInternalServerError)
-			return
-		}
-
-		// Extract pattern from context for path parameter extraction
-		registeredPattern := r.URL.Path // Default fallback
-
-		// Get the actual route pattern from the request's context if available
-		if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
-			registeredPattern = patternKey // Use the full pattern from context
-			m.logger.Printf("Using pattern from context: %s", registeredPattern)
-
-			// Extract parameters from pattern and URL path
-			requestPath := r.URL.Path
-			pathParams := extractPathParams(registeredPattern, requestPath)
-			if pathParams != nil && len(pathParams) > 0 {
-				// Log the extracted parameters
-				m.logger.Printf("Extracted path parameters: %v", pathParams)
-
-				// Add to environment variables
-				paramsJSON, _ := json.Marshal(pathParams)
-				// These will be picked up by path_globals.php
-				os.Setenv("FRANGO_PATH_PARAMS_JSON", string(paramsJSON))
-				for key, value := range pathParams {
-					os.Setenv("FRANGO_PARAM_"+key, value)
-				}
-			}
-		} else {
-			m.logger.Printf("No pattern found in context, using URL path: %s", registeredPattern)
-		}
-
-		// Execute PHP with the appropriate registered pattern for parameter extraction
-		m.executePHP(absScriptPath, nil, w, r)
-
-		// Clean up environment variables
-		if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
-			pathParams := extractPathParams(patternKey, r.URL.Path)
-			if pathParams != nil && len(pathParams) > 0 {
-				os.Unsetenv("FRANGO_PATH_PARAMS_JSON")
-				for key := range pathParams {
-					os.Unsetenv("FRANGO_PARAM_" + key)
-				}
-			}
-		}
+// NewVFS creates a new VFS instance
+func NewVFS(tempDir string, logger *log.Logger, developMode bool) (*vfs.VFS, error) {
+	return vfs.NewVFSWithConfig(vfs.VFSConfig{
+		TempDir:     tempDir,
+		Logger:      logger,
+		DevelopMode: developMode,
 	})
 }
 
-// Render returns an http.Handler that executes a PHP script with data.
-// scriptPath can be relative to the SourceDir or an absolute path.
-// The pattern is automatically extracted from the request.
-func (m *Middleware) Render(scriptPath string, renderFn RenderData) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Resolve script path immediately if relative
-		absScriptPath := m.resolveScriptPath(scriptPath)
+// NewVFS creates a new virtual filesystem instance for the middleware
+// If the middleware has a root VFS, the new VFS will branch from it
+func (m *Middleware) NewVFS() *vfs.VFS {
+	m.vfsCreateLock.Lock()
+	defer m.vfsCreateLock.Unlock()
 
-		// Initialization check
-		if !m.ensureInitialized(r.Context()) {
-			http.Error(w, "PHP initialization error", http.StatusInternalServerError)
-			return
-		}
-
-		// Extract pattern from context for path parameter extraction
-		registeredPattern := r.URL.Path // Default fallback
-
-		// Get the actual route pattern from the request's context if available
-		if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
-			registeredPattern = patternKey // Use the full pattern from context
-			m.logger.Printf("Using pattern from context: %s", registeredPattern)
-		} else {
-			m.logger.Printf("No pattern found in context, using URL path: %s", registeredPattern)
-		}
-
-		// Execute PHP with render data and the appropriate pattern for parameter extraction
-		m.executePHP(absScriptPath, renderFn, w, r)
-	})
-}
-
-// AddEmbeddedLibrary adds a PHP utility/library file from an embed.FS.
-// It writes the file to a temporary location and registers it with the cache
-// to be copied into PHP environments when they are created/updated.
-// targetLibraryPath determines the path where the library will be available
-// inside the PHP environment (e.g., "/lib/utils.php" -> envTmp/lib/utils.php).
-func (m *Middleware) AddEmbeddedLibrary(embedFS embed.FS, embedPath string, targetLibraryPath string) (string, error) {
-	content, err := embedFS.ReadFile(embedPath)
-	if err != nil {
-		m.logger.Printf("Error reading embedded library file %s: %v", embedPath, err)
-		return "", fmt.Errorf("failed to read embedded library %s: %w", embedPath, err)
-	}
-
-	// Ensure targetLibraryPath is relative and clean
-	relativeEmbedPath := strings.TrimPrefix(targetLibraryPath, "/")
-	if relativeEmbedPath == "" {
-		return "", fmt.Errorf("invalid empty target path for embedded library")
-	}
-	relativeEmbedPath = filepath.Clean(relativeEmbedPath)
-
-	// Create the target path within the dedicated embeds temp directory
-	embedTempBaseDir := filepath.Join(m.tempDir, "_frango_embeds")
-	targetDiskPath := filepath.Join(embedTempBaseDir, relativeEmbedPath)
-
-	// Create directory structure
-	if targetDir := filepath.Dir(targetDiskPath); targetDir != "" {
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
-			m.logger.Printf("Warning: Failed to create directory for embedded library %s: %v", targetDiskPath, err)
-			// Proceed anyway, WriteFile might still work or fail clearly
-		}
-	}
-
-	// Write file
-	if err := os.WriteFile(targetDiskPath, content, 0644); err != nil {
-		m.logger.Printf("Warning: Failed to write embedded library file %s: %v", targetDiskPath, err)
-		return "", fmt.Errorf("failed to write embedded library file %s: %w", targetDiskPath, err)
-	}
-
-	m.logger.Printf("Added embedded PHP library for path %s (temp path: %s)", targetLibraryPath, targetDiskPath)
-
-	// Register this library with the environment cache
-	m.envCache.AddGlobalLibrary(relativeEmbedPath, targetDiskPath)
-
-	return targetDiskPath, nil
-}
-
-// SourceDir returns the resolved absolute path to the source directory being used.
-func (m *Middleware) SourceDir() string {
-	return m.sourceDir
-}
-
-// --- Filesystem Routing Utility (Exported) ---
-
-// FileSystemRoute represents a discovered route from the filesystem.
-type FileSystemRoute struct {
-	Method     string       // HTTP method (GET, POST, etc.) or "" for ANY
-	Pattern    string       // The URL pattern (e.g., "/users/{id}", "/posts/welcome")
-	Handler    http.Handler // The generated frango handler for the script
-	ScriptPath string       // Source path of the script relative to the scanned filesystem root
-}
-
-// --- Filesystem Routing Options (Enums and Struct) ---
-
-// OptionSetting defines explicit states for boolean-like options.
-type OptionSetting int
-
-const (
-	// OptionDefault uses the function's default behavior.
-	OptionDefault OptionSetting = iota // 0
-	// OptionEnabled explicitly enables the feature.
-	OptionEnabled // 1
-	// OptionDisabled explicitly disables the feature.
-	OptionDisabled // 2
-)
-
-// FileSystemRouteOptions provides configuration for MapFileSystemRoutes.
-type FileSystemRouteOptions struct {
-	// GenerateCleanURLs: Controls generation of routes without .php extension.
-	// Default behavior is OptionEnabled.
-	GenerateCleanURLs OptionSetting
-	// GenerateIndexRoutes: Controls generation of routes for index.php at directory level.
-	// Default behavior is OptionEnabled.
-	GenerateIndexRoutes OptionSetting
-	// DetectMethodByFilename: Controls checking for .METHOD.php patterns.
-	// Default behavior is OptionDisabled.
-	DetectMethodByFilename OptionSetting
-}
-
-// MapFileSystemRoutes scans a directory (`scanDir`) within a filesystem (`targetFS`)
-// and generates a slice of FileSystemRoute structs based on the found PHP files.
-// It maps these files to URL paths relative to `urlPrefix`.
-// Assumes targetFS root corresponds to the frangoInstance's SourceDir for script path resolution.
-func MapFileSystemRoutes(
-	frangoInstance *Middleware,
-	targetFS fs.FS, // Filesystem to scan (e.g., os.DirFS("pages"), embed.FS)
-	scanDir string, // Subdirectory within targetFS to start scanning (e.g., ".")
-	urlPrefix string, // URL prefix for generated routes (e.g., "/", "/app")
-	options *FileSystemRouteOptions,
-) ([]FileSystemRoute, error) {
-
-	var routes []FileSystemRoute
-	opt := options
-
-	// Determine effective settings based on options or defaults
-	generateCleanSetting := OptionEnabled
-	generateIndexSetting := OptionEnabled
-	detectMethodSetting := OptionDisabled
-	if opt != nil {
-		if opt.GenerateCleanURLs != OptionDefault {
-			generateCleanSetting = opt.GenerateCleanURLs
-		}
-		if opt.GenerateIndexRoutes != OptionDefault {
-			generateIndexSetting = opt.GenerateIndexRoutes
-		}
-		if opt.DetectMethodByFilename != OptionDefault {
-			detectMethodSetting = opt.DetectMethodByFilename
-		}
-	}
-
-	// Boolean flags derived from settings for use in logic
-	generateClean := generateCleanSetting == OptionEnabled
-	generateIndex := generateIndexSetting == OptionEnabled
-	detectMethod := detectMethodSetting == OptionEnabled
-
-	// Normalize urlPrefix
-	urlPrefix = "/" + strings.Trim(urlPrefix, "/")
-	if urlPrefix == "/" {
-		urlPrefix = ""
-	} // Avoid double slash at root
-
-	scanDir = filepath.Clean(scanDir)
-
-	frangoInstance.logger.Printf("Mapping filesystem routes: FS=%T, ScanDir='%s', Prefix='%s'", targetFS, scanDir, urlPrefix)
-
-	walkErr := fs.WalkDir(targetFS, scanDir, func(path string, d fs.DirEntry, err error) error {
+	// Create or use the root VFS
+	if m.rootVFS == nil {
+		vfs, err := NewVFS(m.tempDir, m.logger, m.developmentMode)
 		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".php") {
-			return nil // Skip directories and non-php files
-		}
-
-		scriptPathForHandler := path // Path relative to targetFS root
-
-		// Calculate URL path relative to urlPrefix
-		// Use filepath.Rel to get path relative to scanDir root
-		relToScanDir, err := filepath.Rel(scanDir, path)
-		if err != nil {
-			// Log error but maybe continue? Skipping this file.
-			frangoInstance.logger.Printf("Error calculating relative path for '%s' in '%s': %v. Skipping.", path, scanDir, err)
+			m.logger.Printf("Error creating new VFS: %v", err)
 			return nil
 		}
-		// Ensure forward slashes for URL and join with prefix
-		urlPath := urlPrefix + "/" + filepath.ToSlash(relToScanDir)
-		urlPath = "/" + strings.Trim(urlPath, "/") // Clean final URL path
-
-		// --- Detect Method (Optional) ---
-		method := "" // Default: ANY method
-		baseName := d.Name()
-		patternPath := urlPath // Path part used in final registered pattern
-
-		if detectMethod {
-			// Check for pattern like `filename.METHOD.php`
-			parts := strings.Split(baseName, ".")
-			if len(parts) == 3 && strings.ToLower(parts[2]) == "php" {
-				potentialMethod := strings.ToUpper(parts[1])
-				if isHTTPMethod(potentialMethod) {
-					method = potentialMethod
-					// Adjust patternPath to remove method part for clean/index routes
-					baseWithoutExt := strings.TrimSuffix(baseName, "."+parts[1]+".php")
-					patternPath = filepath.Join(filepath.Dir(urlPath), baseWithoutExt)
-					patternPath = strings.ReplaceAll(patternPath, string(os.PathSeparator), "/")
-					patternPath = "/" + strings.Trim(patternPath, "/")
-					frangoInstance.logger.Printf("Detected method '%s' for %s", method, path)
-				}
-			}
-		}
-
-		// --- Generate Handler & Base Route ---
-		handler := frangoInstance.For(scriptPathForHandler)
-		routes = append(routes, FileSystemRoute{Method: method, Pattern: patternPath, Handler: handler, ScriptPath: path})
-		frangoInstance.logger.Printf("Mapped FS Route: [%s] %s -> %s", method, patternPath, path)
-
-		// --- Generate Implicit Routes (if enabled and method allows) ---
-		// Only generate clean/index for GET or ANY method routes
-		if method == "" || method == http.MethodGet {
-			if generateClean && strings.HasSuffix(patternPath, ".php") {
-				cleanPattern := strings.TrimSuffix(patternPath, ".php")
-				if cleanPattern != urlPrefix || len(cleanPattern) > 0 { // Avoid root conflict
-					cleanHandler := frangoInstance.For(scriptPathForHandler)
-					routes = append(routes, FileSystemRoute{Method: method, Pattern: cleanPattern, Handler: cleanHandler, ScriptPath: path})
-					frangoInstance.logger.Printf("Mapped Clean URL: [%s] %s -> %s", method, cleanPattern, path)
-				}
-			}
-			if generateIndex && filepath.Base(scriptPathForHandler) == "index.php" {
-				dirPath := filepath.Dir(patternPath) // Dir of the pattern path
-				if dirPath == "." {
-					dirPath = "/" // Handle root case from filepath.Dir
-				} else if !strings.HasSuffix(dirPath, "/") {
-					dirPath += "/"
-				}
-
-				// Only skip registration if the calculated directory path is exactly the
-				// same as a non-root urlPrefix (avoids double registration for prefix itself).
-				// We WANT to register "/" if the prefix was "/" (empty string after norm)
-				// and we found index.php at the root.
-				shouldRegister := true
-				if dirPath == urlPrefix && urlPrefix != "" {
-					shouldRegister = false
-				}
-
-				if shouldRegister {
-					dirHandler := frangoInstance.For(scriptPathForHandler)
-					routes = append(routes, FileSystemRoute{Method: method, Pattern: dirPath, Handler: dirHandler, ScriptPath: path})
-					frangoInstance.logger.Printf("Mapped Index Dir: [%s] %s -> %s", method, dirPath, path)
-				}
-			}
-		}
-
-		return nil
-	})
-
-	if walkErr != nil {
-		return nil, fmt.Errorf("error scanning directory '%s': %w", scanDir, walkErr)
+		return vfs
 	}
 
-	return routes, nil
+	// Branch from the root VFS
+	return m.rootVFS.Branch()
 }
 
-// --- Virtual Filesystem Types ---
+// getRootVFS gets or creates the root VFS
+func (m *Middleware) getRootVFS() (*vfs.VFS, error) {
+	m.vfsCreateLock.Lock()
+	defer m.vfsCreateLock.Unlock()
 
-// VirtualFS represents a virtual filesystem container for PHP files
-type VirtualFS struct {
-	name              string
-	sourceMappings    map[string]string // Virtual path -> source path
-	reverseSource     map[string]string // Source path -> virtual path
-	embedMappings     map[string]string // Virtual path -> embed temp path
-	baseTempPath      string            // Base temp dir for this VFS
-	sourceHashes      map[string]string // Source path -> content hash
-	middleware        *Middleware
-	mutex             sync.RWMutex
-	invalidated       bool              // Whether this VFS needs refresh
-	invalidatedPaths  map[string]bool   // Specific paths that need refresh
-	watchTicker       *time.Ticker      // Ticker for file watching
-	watchStop         chan bool         // Channel to stop watching
-	fileOrigins       map[string]string // Virtual path -> origin type ("source", "embed", "virtual")
-	virtualFiles      map[string][]byte // Virtual path -> content for virtual files
-	virtualFileHashes map[string]string // Virtual path -> hash for virtual files
-}
-
-// NewFS creates a new virtual filesystem container
-func (m *Middleware) NewFS() *VirtualFS {
-	vfs := &VirtualFS{
-		name:              generateUniqueID(),
-		sourceMappings:    make(map[string]string),
-		reverseSource:     make(map[string]string),
-		embedMappings:     make(map[string]string),
-		sourceHashes:      make(map[string]string),
-		invalidatedPaths:  make(map[string]bool),
-		fileOrigins:       make(map[string]string),
-		virtualFiles:      make(map[string][]byte),
-		virtualFileHashes: make(map[string]string),
-		watchStop:         make(chan bool),
-		middleware:        m,
-	}
-
-	// Create base temp dir for this VFS
-	tempPath, err := os.MkdirTemp(m.tempDir, "vfs-"+vfs.name+"-")
-	if err != nil {
-		m.logger.Printf("Warning: Failed to create VFS temp dir: %v", err)
-		tempPath = filepath.Join(m.tempDir, "vfs-"+vfs.name)
-		os.MkdirAll(tempPath, 0755)
-	}
-	vfs.baseTempPath = tempPath
-
-	return vfs
-}
-
-// AddSourceFile adds a single file from the filesystem to the VFS
-func (v *VirtualFS) AddSourceFile(sourcePath string, virtualPath string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Normalize virtual path
-	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-	// Get absolute path for the source file
-	absPath, err := filepath.Abs(sourcePath)
-	if err != nil {
-		return fmt.Errorf("error resolving absolute path for '%s': %w", sourcePath, err)
-	}
-
-	// Verify file exists
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		return fmt.Errorf("error accessing file '%s': %w", absPath, err)
-	}
-	if fileInfo.IsDir() {
-		return fmt.Errorf("source path '%s' is a directory, expected a file", absPath)
-	}
-
-	// Calculate initial hash
-	hash, err := calculateFileHash(absPath)
-	if err != nil {
-		return fmt.Errorf("error calculating hash for '%s': %w", absPath, err)
-	}
-
-	// Store mappings
-	v.sourceMappings[virtualPath] = absPath
-	v.reverseSource[absPath] = virtualPath
-	v.sourceHashes[absPath] = hash
-	v.fileOrigins[virtualPath] = "source"
-
-	v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, absPath, hash[:8])
-
-	// Ensure file watching in development mode (if not already running)
-	if v.middleware.developmentMode && v.watchTicker == nil {
-		go v.watchSourceFiles()
-	}
-
-	return nil
-}
-
-// AddSourceDirectory adds all files from a source directory to the VFS
-// The pathPattern can contain glob patterns (e.g., "./php/dashboard/*")
-// The virtualPrefix is the base path to mount these files in the VFS
-func (v *VirtualFS) AddSourceDirectory(pathPattern string, virtualPrefix string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Normalize virtual prefix
-	virtualPrefix = filepath.Clean("/" + strings.TrimPrefix(virtualPrefix, "/"))
-
-	// Expand the glob pattern
-	matches, err := filepath.Glob(pathPattern)
-	if err != nil {
-		return fmt.Errorf("error expanding glob pattern '%s': %w", pathPattern, err)
-	}
-
-	for _, match := range matches {
-		absPath, err := filepath.Abs(match)
+	if m.rootVFS == nil {
+		var err error
+		m.rootVFS, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
 		if err != nil {
-			v.middleware.logger.Printf("Warning: Could not resolve absolute path for '%s': %v", match, err)
-			continue
-		}
-
-		fileInfo, err := os.Stat(absPath)
-		if err != nil {
-			v.middleware.logger.Printf("Warning: Could not stat '%s': %v", absPath, err)
-			continue
-		}
-
-		if fileInfo.IsDir() {
-			// Process the directory recursively
-			err = filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				if !info.IsDir() {
-					relPath, err := filepath.Rel(absPath, path)
-					if err != nil {
-						return nil // Skip file with error
-					}
-
-					virtualPath := filepath.Join(virtualPrefix, relPath)
-					sourcePath := path
-
-					// Calculate initial hash
-					hash, _ := calculateFileHash(sourcePath)
-
-					// Store mappings
-					v.sourceMappings[virtualPath] = sourcePath
-					v.reverseSource[sourcePath] = virtualPath
-					v.sourceHashes[sourcePath] = hash
-					v.fileOrigins[virtualPath] = "source"
-
-					v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, sourcePath, hash[:8])
-				}
-				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("error walking directory '%s': %w", absPath, err)
-			}
-		} else {
-			// Single file
-			baseName := filepath.Base(absPath)
-			virtualPath := filepath.Join(virtualPrefix, baseName)
-			sourcePath := absPath
-
-			// Calculate initial hash
-			hash, _ := calculateFileHash(sourcePath)
-
-			// Store mappings
-			v.sourceMappings[virtualPath] = sourcePath
-			v.reverseSource[sourcePath] = virtualPath
-			v.sourceHashes[sourcePath] = hash
-			v.fileOrigins[virtualPath] = "source"
-
-			v.middleware.logger.Printf("Added source file mapping: %s -> %s (hash: %s)", virtualPath, sourcePath, hash[:8])
+			return nil, fmt.Errorf("failed to create root VFS: %w", err)
 		}
 	}
 
-	// Schedule file watching in development mode (if not already running)
-	if v.middleware.developmentMode && v.watchTicker == nil {
-		go v.watchSourceFiles()
-	}
-
-	return nil
+	return m.rootVFS, nil
 }
 
-// AddEmbeddedFile adds a single file from an embed.FS to the VFS
-func (v *VirtualFS) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
+// --- Operations on the root VFS ---
 
-	// Normalize virtual path
-	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-	// Read the content from the embedded filesystem
-	content, err := embedFS.ReadFile(fsPath)
+// AddSourceFile adds a file from the filesystem to the root VFS
+func (m *Middleware) AddSourceFile(sourcePath string, virtualPath string) error {
+	vfs, err := m.getRootVFS()
 	if err != nil {
-		return fmt.Errorf("error reading embedded file '%s': %w", fsPath, err)
-	}
-
-	// Create target directory in VFS temp space
-	targetDir := filepath.Dir(filepath.Join(v.baseTempPath, virtualPath))
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("error creating directory for embedded file '%s': %w", targetDir, err)
-	}
-
-	// Write to temp path
-	tempPath := filepath.Join(v.baseTempPath, virtualPath)
-	if err := os.WriteFile(tempPath, content, 0644); err != nil {
-		return fmt.Errorf("error writing embedded file to '%s': %w", tempPath, err)
-	}
-
-	// Store mapping
-	v.embedMappings[virtualPath] = tempPath
-	v.fileOrigins[virtualPath] = "embed"
-	v.middleware.logger.Printf("Added embedded file mapping: %s -> %s", virtualPath, tempPath)
-
-	return nil
-}
-
-// AddEmbeddedDirectory adds an entire directory from an embed.FS to the VFS
-func (v *VirtualFS) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefix string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Normalize virtual prefix
-	virtualPrefix = filepath.Clean("/" + strings.TrimPrefix(virtualPrefix, "/"))
-
-	// List the directory contents
-	entries, err := embedFS.ReadDir(fsPath)
-	if err != nil {
-		return fmt.Errorf("error reading embedded directory '%s': %w", fsPath, err)
-	}
-
-	// Process each entry
-	for _, entry := range entries {
-		entryPath := filepath.Join(fsPath, entry.Name())
-		virtualEntryPath := filepath.Join(virtualPrefix, entry.Name())
-
-		if entry.IsDir() {
-			// Recursively process subdirectory
-			if err := v.AddEmbeddedDirectory(embedFS, entryPath, virtualEntryPath); err != nil {
-				return err
-			}
-		} else {
-			// Process file
-			content, err := embedFS.ReadFile(entryPath)
-			if err != nil {
-				v.middleware.logger.Printf("Warning: Could not read embedded file '%s': %v", entryPath, err)
-				continue
-			}
-
-			// Create target directory in VFS temp space
-			targetDir := filepath.Dir(filepath.Join(v.baseTempPath, virtualEntryPath))
-			if err := os.MkdirAll(targetDir, 0755); err != nil {
-				v.middleware.logger.Printf("Warning: Could not create directory for embedded file '%s': %v", targetDir, err)
-				continue
-			}
-
-			// Write to temp path
-			tempPath := filepath.Join(v.baseTempPath, virtualEntryPath)
-			if err := os.WriteFile(tempPath, content, 0644); err != nil {
-				v.middleware.logger.Printf("Warning: Could not write embedded file to '%s': %v", tempPath, err)
-				continue
-			}
-
-			// Store mapping
-			v.embedMappings[virtualEntryPath] = tempPath
-			v.fileOrigins[virtualEntryPath] = "embed"
-			v.middleware.logger.Printf("Added embedded file mapping: %s -> %s", virtualEntryPath, tempPath)
-		}
-	}
-
-	return nil
-}
-
-// CreateVirtualFile creates a file directly in the virtual filesystem with provided content
-func (v *VirtualFS) CreateVirtualFile(virtualPath string, content []byte) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Normalize virtual path
-	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-	// Create target directory in VFS temp space
-	targetDir := filepath.Dir(filepath.Join(v.baseTempPath, virtualPath))
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("error creating directory for virtual file '%s': %w", targetDir, err)
-	}
-
-	// Write to temp path
-	tempPath := filepath.Join(v.baseTempPath, virtualPath)
-	if err := os.WriteFile(tempPath, content, 0644); err != nil {
-		return fmt.Errorf("error writing virtual file to '%s': %w", tempPath, err)
-	}
-
-	// Store the content and mapping
-	v.virtualFiles[virtualPath] = content
-	v.embedMappings[virtualPath] = tempPath // Use embed mappings for write access
-	v.fileOrigins[virtualPath] = "virtual"
-
-	// Calculate hash of content
-	h := sha256.New()
-	h.Write(content)
-	hash := hex.EncodeToString(h.Sum(nil))
-	v.virtualFileHashes[virtualPath] = hash
-
-	v.middleware.logger.Printf("Created virtual file: %s (hash: %s)", virtualPath, hash[:8])
-
-	return nil
-}
-
-// CopyFile copies a file from one virtual path to another within the VFS
-func (v *VirtualFS) CopyFile(srcVirtualPath, destVirtualPath string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Normalize paths
-	srcVirtualPath = filepath.Clean("/" + strings.TrimPrefix(srcVirtualPath, "/"))
-	destVirtualPath = filepath.Clean("/" + strings.TrimPrefix(destVirtualPath, "/"))
-
-	// Resolve the actual source path
-	var content []byte
-	var err error
-
-	// Check the source type
-	originType, exists := v.fileOrigins[srcVirtualPath]
-	if !exists {
-		return fmt.Errorf("source file not found in VFS: %s", srcVirtualPath)
-	}
-
-	switch originType {
-	case "source":
-		// Read from filesystem
-		sourcePath := v.sourceMappings[srcVirtualPath]
-		content, err = os.ReadFile(sourcePath)
-		if err != nil {
-			return fmt.Errorf("error reading source file '%s': %w", sourcePath, err)
-		}
-	case "embed", "virtual":
-		// For embedded or virtual files, get from the temp location
-		if tempPath, ok := v.embedMappings[srcVirtualPath]; ok {
-			content, err = os.ReadFile(tempPath)
-			if err != nil {
-				return fmt.Errorf("error reading embedded/virtual file '%s': %w", tempPath, err)
-			}
-		} else if originType == "virtual" {
-			// Get from in-memory content for virtual files
-			content = v.virtualFiles[srcVirtualPath]
-		} else {
-			return fmt.Errorf("embedded file mapping not found: %s", srcVirtualPath)
-		}
-	default:
-		return fmt.Errorf("unknown file origin type for %s: %s", srcVirtualPath, originType)
-	}
-
-	// Create target directory in VFS temp space
-	targetDir := filepath.Dir(filepath.Join(v.baseTempPath, destVirtualPath))
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("error creating directory for destination '%s': %w", targetDir, err)
-	}
-
-	// Write to destination temp path
-	tempPath := filepath.Join(v.baseTempPath, destVirtualPath)
-	if err := os.WriteFile(tempPath, content, 0644); err != nil {
-		return fmt.Errorf("error writing file to '%s': %w", tempPath, err)
-	}
-
-	// Store as a virtual file
-	v.virtualFiles[destVirtualPath] = content
-	v.embedMappings[destVirtualPath] = tempPath
-	v.fileOrigins[destVirtualPath] = "virtual"
-
-	// Calculate hash
-	h := sha256.New()
-	h.Write(content)
-	hash := hex.EncodeToString(h.Sum(nil))
-	v.virtualFileHashes[destVirtualPath] = hash
-
-	v.middleware.logger.Printf("Copied file: %s -> %s (hash: %s)", srcVirtualPath, destVirtualPath, hash[:8])
-
-	return nil
-}
-
-// MoveFile moves a file from one virtual path to another within the VFS
-func (v *VirtualFS) MoveFile(srcVirtualPath, destVirtualPath string) error {
-	// First copy the file
-	if err := v.CopyFile(srcVirtualPath, destVirtualPath); err != nil {
 		return err
 	}
-
-	// Then delete the source
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Don't actually delete source files from disk
-	originType := v.fileOrigins[srcVirtualPath]
-
-	// Remove mappings
-	delete(v.embedMappings, srcVirtualPath)
-	delete(v.virtualFiles, srcVirtualPath)
-	delete(v.virtualFileHashes, srcVirtualPath)
-	delete(v.fileOrigins, srcVirtualPath)
-
-	// For source files, only remove the virtual mapping, not the actual file
-	if originType == "source" {
-		sourcePath := v.sourceMappings[srcVirtualPath]
-		delete(v.sourceMappings, srcVirtualPath)
-		delete(v.reverseSource, sourcePath)
-		// We keep the sourceHashes entry for monitoring changes
-	}
-
-	v.middleware.logger.Printf("Moved file: %s -> %s", srcVirtualPath, destVirtualPath)
-	return nil
+	return vfs.AddSourceFile(sourcePath, virtualPath)
 }
 
-// DeleteFile removes a file from the VFS
-func (v *VirtualFS) DeleteFile(virtualPath string) error {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
+// AddSourceDirectory adds all files from a directory to the root VFS
+func (m *Middleware) AddSourceDirectory(sourceDir string, virtualPrefix string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.AddSourceDirectory(sourceDir, virtualPrefix)
+}
 
-	// Normalize virtual path
-	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
+// AddEmbeddedFile adds a single file from an embed.FS to the root VFS
+func (m *Middleware) AddEmbeddedFile(embedFS embed.FS, fsPath string, virtualPath string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.AddEmbeddedFile(embedFS, fsPath, virtualPath)
+}
+
+// AddEmbeddedDirectory adds a directory from an embed.FS to the root VFS
+func (m *Middleware) AddEmbeddedDirectory(embedFS embed.FS, fsPath string, virtualPrefix string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.AddEmbeddedDirectory(embedFS, fsPath, virtualPrefix)
+}
+
+// AddEmbeddedLibrary adds an embedded file to the root VFS and returns its disk path
+// This is maintained for backward compatibility
+func (m *Middleware) AddEmbeddedLibrary(embedFS embed.FS, fsPath string, targetLibraryPath string) (string, error) {
+	// Create a VFS if we don't have one yet
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return "", err
+	}
+
+	// Add the embedded file to the root VFS
+	if err := vfs.AddEmbeddedFile(embedFS, fsPath, targetLibraryPath); err != nil {
+		return "", fmt.Errorf("failed to add embedded file to VFS: %w", err)
+	}
+
+	// Resolve the virtual path to a disk path
+	diskPath, err := vfs.ResolvePath(targetLibraryPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve library path: %w", err)
+	}
+
+	return diskPath, nil
+}
+
+// CreateVirtualFile creates a file directly in the root VFS
+func (m *Middleware) CreateVirtualFile(virtualPath string, content []byte) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.CreateVirtualFile(virtualPath, content)
+}
+
+// CopyFile copies a file within the root VFS
+func (m *Middleware) CopyFile(srcVirtualPath, destVirtualPath string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.CopyFile(srcVirtualPath, destVirtualPath)
+}
+
+// MoveFile moves a file within the root VFS
+func (m *Middleware) MoveFile(srcVirtualPath, destVirtualPath string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.MoveFile(srcVirtualPath, destVirtualPath)
+}
+
+// DeleteFile deletes a file from the root VFS
+func (m *Middleware) DeleteFile(virtualPath string) error {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return err
+	}
+	return vfs.DeleteFile(virtualPath)
+}
+
+// ListFiles lists all files in the root VFS
+func (m *Middleware) ListFiles() ([]string, error) {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return nil, err
+	}
+	return vfs.ListFiles(), nil
+}
+
+// GetFileContent gets the content of a file from the root VFS
+func (m *Middleware) GetFileContent(virtualPath string) ([]byte, error) {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return nil, err
+	}
+	return vfs.GetFileContent(virtualPath)
+}
+
+// FileExists checks if a file exists in the root VFS
+func (m *Middleware) FileExists(virtualPath string) (bool, error) {
+	vfs, err := m.getRootVFS()
+	if err != nil {
+		return false, err
+	}
+	return vfs.FileExists(virtualPath), nil
+}
+
+func (m *Middleware) getErrorReportingHandler(err error) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Log the error
+		m.logger.Printf("Error handling request for %s: %v", r.URL.Path, err)
+
+		// Determine status code based on error type
+		statusCode := http.StatusInternalServerError
+		if os.IsNotExist(err) || strings.Contains(err.Error(), "not found") {
+			statusCode = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "permission") || strings.Contains(err.Error(), "access") {
+			statusCode = http.StatusForbidden
+		}
+
+		// Create different error responses based on development mode
+		if m.developmentMode {
+			// In development mode: provide rich error details with HTML formatting
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(statusCode)
+
+			// HTML error template
+			errHTML := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Frango PHP Error</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; padding: 2rem; max-width: 900px; margin: 0 auto; }
+        .error-container { background: #fff0f0; border-left: 4px solid #ff3333; padding: 1rem 1.5rem; border-radius: 4px; }
+        .error-type { font-weight: bold; font-size: 1.2rem; color: #cc0000; margin-bottom: 0.5rem; }
+        .error-message { font-family: monospace; padding: 0.5rem; background: #f8f8f8; border-radius: 3px; overflow-x: auto; }
+        .error-info { margin-top: 1rem; }
+        .error-path { font-family: monospace; }
+        .stack { margin-top: 1rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+        .stack-trace { font-size: 0.9rem; font-family: monospace; white-space: pre-wrap; background: #f8f8f8; padding: 0.8rem; overflow-x: auto; }
+        .details { margin-top: 1rem; }
+        .details code { font-family: monospace; background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Frango PHP Error</h1>
+    <div class="error-container">
+        <div class="error-type">%s Error (%d)</div>
+        <div class="error-message">%s</div>
+        <div class="error-info">
+            <p>Request URL: <span class="error-path">%s</span></p>
+            <p>Script Path: <span class="error-path">%s</span></p>
+        </div>
+        <div class="details">
+            <p>This error occurred while trying to serve a PHP script through the Frango middleware. Check that:</p>
+            <ul>
+                <li>The PHP file exists at the specified path</li>
+                <li>The PHP file contains valid PHP code</li>
+                <li>Permissions are set correctly on the file and directories</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+`
+			// Get error type string based on status code
+			errorType := "Server"
+			if statusCode == http.StatusNotFound {
+				errorType = "Not Found"
+			} else if statusCode == http.StatusForbidden {
+				errorType = "Access Denied"
+			}
+
+			// Fill in the HTML template
+			scriptPath := r.URL.Path
+			if r.URL.Path == "" {
+				scriptPath = "[not specified]"
+			}
+
+			html := fmt.Sprintf(errHTML,
+				errorType, statusCode,
+				html.EscapeString(err.Error()),
+				html.EscapeString(r.URL.String()),
+				html.EscapeString(scriptPath))
+
+			fmt.Fprint(w, html)
+		} else {
+			// In production mode: provide minimal, secure error information
+			// Don't expose internal details
+			message := "Internal server error"
+			if statusCode == http.StatusNotFound {
+				message = "The requested resource was not found"
+			} else if statusCode == http.StatusForbidden {
+				message = "Access denied"
+			}
+
+			http.Error(w, message, statusCode)
+		}
+	})
+}
+
+// For creates a handler that will serve the given PHP script.
+//
+// All handlers created by For share the same main VFS instance, which ensures
+// consistency across different routes. File modifications made in one route
+// will be visible to all other routes.
+//
+// If you need isolated environments for different scripts, use ForVFS with
+// a branched VFS instance.
+func (m *Middleware) For(phpScriptPath string) http.Handler {
+	// Use the main VFS instance for all routes to maintain consistency
+	return m.ForVFS(m.rootVFS, phpScriptPath)
+}
+
+// Render returns an http.Handler that renders a PHP script with data from renderFn
+func (m *Middleware) Render(scriptPath string, renderFn RenderData) http.Handler {
+	// Use rootVFS or create one if needed
+	var vfs *vfs.VFS
+	if m.rootVFS != nil {
+		vfs = m.rootVFS
+	} else {
+		var err error
+		vfs, err = NewVFS(m.tempDir, m.logger, m.developmentMode)
+		defer vfs.Cleanup()
+		if err != nil {
+			// http.Error(w, "Failed to initialize VFS", http.StatusInternalServerError)
+			return m.getErrorReportingHandler(err)
+		}
+	}
 
 	// Check if file exists in VFS
-	originType, exists := v.fileOrigins[virtualPath]
-	if !exists {
-		return fmt.Errorf("file not found in VFS: %s", virtualPath)
-	}
-
-	// Remove mappings based on origin type
-	if originType == "source" {
-		sourcePath := v.sourceMappings[virtualPath]
-		delete(v.sourceMappings, virtualPath)
-		delete(v.reverseSource, sourcePath)
-		// We don't delete the source file from disk
-	} else if originType == "embed" || originType == "virtual" {
-		if tempPath, ok := v.embedMappings[virtualPath]; ok {
-			// Try to remove the temp file but don't error if it fails
-			_ = os.Remove(tempPath)
-			delete(v.embedMappings, virtualPath)
-		}
-		delete(v.virtualFiles, virtualPath)
-		delete(v.virtualFileHashes, virtualPath)
-	}
-
-	delete(v.fileOrigins, virtualPath)
-	v.middleware.logger.Printf("Deleted file from VFS: %s", virtualPath)
-	return nil
-}
-
-// ListFiles returns a list of all files in the VFS
-func (v *VirtualFS) ListFiles() []string {
-	v.mutex.RLock()
-	defer v.mutex.RUnlock()
-
-	files := make([]string, 0, len(v.fileOrigins))
-	for path := range v.fileOrigins {
-		files = append(files, path)
-	}
-	return files
-}
-
-// GetFileContent reads the content of a file from the VFS
-func (v *VirtualFS) GetFileContent(virtualPath string) ([]byte, error) {
-	v.mutex.RLock()
-	defer v.mutex.RUnlock()
-
-	// Normalize virtual path
-	virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-	// Check file origin type
-	originType, exists := v.fileOrigins[virtualPath]
-	if !exists {
-		return nil, fmt.Errorf("file not found in VFS: %s", virtualPath)
-	}
-
-	// Get content based on origin type
-	switch originType {
-	case "source":
-		sourcePath := v.sourceMappings[virtualPath]
-		return os.ReadFile(sourcePath)
-	case "embed", "virtual":
-		// For virtual files, use in-memory content if available
-		if originType == "virtual" && len(v.virtualFiles[virtualPath]) > 0 {
-			return v.virtualFiles[virtualPath], nil
-		}
-		// Otherwise, read from temp path
-		if tempPath, ok := v.embedMappings[virtualPath]; ok {
-			return os.ReadFile(tempPath)
-		}
-		return nil, fmt.Errorf("error resolving file path: %s", virtualPath)
-	default:
-		return nil, fmt.Errorf("unknown file origin type: %s", originType)
-	}
-}
-
-// --- Internal methods ---
-
-// resolvePath translates a virtual path to its actual filesystem path
-func (v *VirtualFS) resolvePath(virtualPath string) string {
-	v.mutex.RLock()
-	defer v.mutex.RUnlock()
-
-	// Check origin type to prioritize correctly
-	originType, exists := v.fileOrigins[virtualPath]
-	if !exists {
-		return ""
-	}
-
-	// Based on the origin type, get the appropriate path
-	switch originType {
-	case "source":
-		return v.sourceMappings[virtualPath]
-	case "embed", "virtual":
-		return v.embedMappings[virtualPath]
-	default:
-		return ""
-	}
-}
-
-// watchSourceFiles periodically checks source files for changes
-func (v *VirtualFS) watchSourceFiles() {
-	// Stop existing watcher if any
-	if v.watchTicker != nil {
-		v.watchTicker.Stop()
-	}
-
-	v.watchTicker = time.NewTicker(500 * time.Millisecond)
-	go func() {
-		for {
-			select {
-			case <-v.watchTicker.C:
-				v.checkFileChanges()
-			case <-v.watchStop:
-				v.watchTicker.Stop()
-				return
-			}
-		}
-	}()
-}
-
-// StopWatching stops the file watching goroutine
-func (v *VirtualFS) StopWatching() {
-	if v.watchTicker != nil {
-		v.watchStop <- true
-		v.watchTicker = nil
-	}
-}
-
-// checkFileChanges checks if any source files have changed
-func (v *VirtualFS) checkFileChanges() {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Check source files
-	for sourcePath, oldHash := range v.sourceHashes {
-		// Skip if file doesn't exist
-		if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
-			continue
-		}
-
-		// Calculate new hash
-		newHash, err := calculateFileHash(sourcePath)
-		if err != nil {
-			v.middleware.logger.Printf("Warning: Could not calculate hash for '%s': %v", sourcePath, err)
-			continue
-		}
-
-		// Check if hash changed
-		if newHash != oldHash {
-			virtualPath := v.reverseSource[sourcePath]
-			v.middleware.logger.Printf("Source file changed: %s (virtual: %s)", sourcePath, virtualPath)
-			v.middleware.logger.Printf("  Hash: %s -> %s", oldHash[:8], newHash[:8])
-
-			// Update hash
-			v.sourceHashes[sourcePath] = newHash
-
-			// Mark path as invalidated
-			v.invalidatedPaths[virtualPath] = true
-			v.invalidated = true
-		}
-	}
-
-	// Check virtual files (for external modifications to temp files)
-	for virtualPath, oldHash := range v.virtualFileHashes {
-		if tempPath, ok := v.embedMappings[virtualPath]; ok {
-			// Skip if file doesn't exist
-			if _, err := os.Stat(tempPath); os.IsNotExist(err) {
-				continue
-			}
-
-			// Calculate new hash
-			newHash, err := calculateFileHash(tempPath)
-			if err != nil {
-				continue
-			}
-
-			// Check if hash changed
-			if newHash != oldHash {
-				v.middleware.logger.Printf("Virtual file changed on disk: %s", virtualPath)
-				v.middleware.logger.Printf("  Hash: %s -> %s", oldHash[:8], newHash[:8])
-
-				// Read the new content
-				content, err := os.ReadFile(tempPath)
-				if err == nil {
-					// Update in-memory content
-					v.virtualFiles[virtualPath] = content
-					v.virtualFileHashes[virtualPath] = newHash
-				}
-
-				// Mark path as invalidated
-				v.invalidatedPaths[virtualPath] = true
-				v.invalidated = true
-			}
-		}
-	}
-}
-
-// refreshIfNeeded ensures the PHP environment is updated if files changed
-func (v *VirtualFS) refreshIfNeeded(virtualPath string) {
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-
-	// Check if this specific path was invalidated
-	if v.invalidatedPaths[virtualPath] {
-		v.middleware.logger.Printf("Refreshing environment for path: %s", virtualPath)
-		delete(v.invalidatedPaths, virtualPath)
-
-		// Force environment refresh for this path by invalidating any cache
-		originType := v.fileOrigins[virtualPath]
-		if originType == "source" {
-			// For source files, invalidate by source path
-			if sourcePath, ok := v.sourceMappings[virtualPath]; ok {
-				v.middleware.logger.Printf("Invalidating cache for source file: %s", sourcePath)
-				// Find any environments using this path and invalidate them
-				for _, env := range v.middleware.envCache.environments {
-					if env.OriginalPath == sourcePath {
-						// Force update by clearing its hash
-						env.mutex.Lock()
-						env.OriginalFileHash = ""
-						env.mutex.Unlock()
-						break
-					}
-				}
-			}
-		} else if originType == "embed" || originType == "virtual" {
-			// For embed/virtual files, invalidate by temp path
-			if tempPath, ok := v.embedMappings[virtualPath]; ok {
-				v.middleware.logger.Printf("Invalidating cache for embedded/virtual file: %s", tempPath)
-				// Find any environments using this path and invalidate them
-				for _, env := range v.middleware.envCache.environments {
-					if env.OriginalPath == tempPath {
-						// Force update by clearing its hash
-						env.mutex.Lock()
-						env.OriginalFileHash = ""
-						env.mutex.Unlock()
-						break
-					}
-				}
-			}
-		}
-	}
-}
-
-// For returns an http.Handler that executes a PHP script from the VFS
-func (v *VirtualFS) For(virtualPath string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check for file changes if needed
-		if v.middleware.developmentMode {
-			v.refreshIfNeeded(virtualPath)
-		}
-
-		// Normalize virtual path
-		virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-		// Resolve the actual path
-		actualPath := v.resolvePath(virtualPath)
-		if actualPath == "" {
-			v.middleware.logger.Printf("Error: Virtual path not found in VFS: %s", virtualPath)
-			http.NotFound(w, r)
-			return
-		}
-
-		// Initialization check
-		if !v.middleware.ensureInitialized(r.Context()) {
-			http.Error(w, "PHP initialization error", http.StatusInternalServerError)
-			return
-		}
-
-		// Execute PHP
-		v.middleware.executePHP(actualPath, nil, w, r)
-	})
-}
-
-// Render returns an http.Handler that executes a PHP script with data
-func (v *VirtualFS) Render(virtualPath string, renderFn RenderData) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check for file changes if needed
-		if v.middleware.developmentMode {
-			v.refreshIfNeeded(virtualPath)
-		}
-
-		// Normalize virtual path
-		virtualPath = filepath.Clean("/" + strings.TrimPrefix(virtualPath, "/"))
-
-		// Resolve the actual path
-		actualPath := v.resolvePath(virtualPath)
-		if actualPath == "" {
-			v.middleware.logger.Printf("Error: Virtual path not found in VFS: %s", virtualPath)
-			http.NotFound(w, r)
-			return
-		}
-
-		// Initialization check
-		if !v.middleware.ensureInitialized(r.Context()) {
-			http.Error(w, "PHP initialization error", http.StatusInternalServerError)
-			return
-		}
-
-		// Execute PHP with render data
-		v.middleware.executePHP(actualPath, renderFn, w, r)
-	})
-}
-
-// generateUniqueID creates a unique identifier for VFS instances
-func generateUniqueID() string {
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
-	return hex.EncodeToString(h.Sum(nil))[:8]
-}
-
-// --- Internal Methods (Middleware Core) ---
-
-// resolveScriptPath ensures the script path is absolute.
-// If relative, it's joined with the SourceDir.
-func (m *Middleware) resolveScriptPath(scriptPath string) string {
-	if !filepath.IsAbs(scriptPath) {
-		// Assume relative to SourceDir
-		return filepath.Join(m.sourceDir, scriptPath)
-	}
-	return scriptPath // Already absolute
-}
-
-// initialize initializes the PHP environment (called lazily).
-func (m *Middleware) initialize(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	if err := frankenphp.Init(); err != nil {
-		return fmt.Errorf("error initializing FrankenPHP: %w", err)
-	}
-	m.initialized = true
-	return nil
-}
-
-// ensureInitialized checks if initialized and initializes if not.
-// Returns true if ready, false on initialization error.
-func (m *Middleware) ensureInitialized(ctx context.Context) bool {
-	if !m.initialized {
-		m.initLock.Lock()
-		defer m.initLock.Unlock()
-		if !m.initialized { // Double-check after lock
-			m.logger.Println("Initializing FrankenPHP...")
-			if err := m.initialize(ctx); err != nil {
-				m.logger.Printf("Error initializing PHP environment: %v", err)
-				return false
-			}
-			m.logger.Println("FrankenPHP initialized.")
-		}
-	}
-	return true
-}
-
-// executePHP handles the core logic of preparing the environment and executing a PHP script.
-// Takes the absolute path to the PHP script to execute.
-func (m *Middleware) executePHP(absScriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) {
-	// 1. Prepare environment data (render vars + path params)
-	envData := make(map[string]string)
-
-	// Extract all request data in a single clean step
-	requestData := ExtractRequestData(r)
-
-	// Add path segments (array indexes start at 0) - RAW DATA ONLY
-	for i, segment := range requestData.PathSegments {
-		envData["FRANGO_URL_SEGMENT_"+strconv.Itoa(i)] = segment
-	}
-
-	// Also provide the number of segments
-	envData["FRANGO_URL_SEGMENT_COUNT"] = strconv.Itoa(len(requestData.PathSegments))
-
-	// Add raw path
-	envData["FRANGO_URL_PATH"] = requestData.Path
-
-	// --- Extract path parameters from pattern ---
-	var pathParams map[string]string
-
-	// Get the actual route pattern from the request's context if available
-	if patternKey := php12PatternContextKey(r.Context()); patternKey != "" {
-		// Use the pattern to extract path parameters
-		pathParams = extractPathParams(patternKey, requestData.Path)
-
-		if pathParams != nil && len(pathParams) > 0 {
-			// Add individual path parameters with FRANGO_PARAM_ prefix (for backwards compatibility)
-			for name, value := range pathParams {
-				envData["FRANGO_PARAM_"+name] = value
-			}
-
-			// Also add serialized path parameters as JSON
-			if jsonParams, err := json.Marshal(pathParams); err == nil {
-				envData["FRANGO_PATH_PARAMS_JSON"] = string(jsonParams)
-			}
-		}
-
-		m.logger.Printf("Extracted path parameters: %v", pathParams)
-	} else {
-		// Check for any path parameters set in environment variables (for tests)
-		paramsJSON := os.Getenv("FRANGO_PATH_PARAMS_JSON")
-		if paramsJSON != "" {
-			m.logger.Printf("Found FRANGO_PATH_PARAMS_JSON in environment: %s", paramsJSON)
-			envData["FRANGO_PATH_PARAMS_JSON"] = paramsJSON
-		}
-
-		// Check for individual parameter variables
-		for _, env := range os.Environ() {
-			if strings.HasPrefix(env, "FRANGO_PARAM_") {
-				parts := strings.SplitN(env, "=", 2)
-				if len(parts) == 2 {
-					key := parts[0]
-					value := parts[1]
-					m.logger.Printf("Found param in environment: %s=%s", key, value)
-					envData[key] = value
-				}
-			}
-		}
-	}
-
-	// Add all query parameters with FRANGO_QUERY_ prefix
-	for key, values := range requestData.QueryParams {
-		if len(values) > 0 {
-			envData["FRANGO_QUERY_"+key] = values[0]
-		}
-	}
-
-	// Add form data with FRANGO_FORM_ prefix
-	for key, values := range requestData.FormData {
-		if len(values) > 0 && !strings.HasPrefix(key, "FRANGO_") { // Avoid overrides
-			envData["FRANGO_FORM_"+key] = values[0]
-		}
-	}
-
-	// Add JSON body data with FRANGO_JSON_ prefix if available
-	if requestData.JSONBody != nil {
-		for key, value := range requestData.JSONBody {
-			// Convert each JSON value to string
-			if strValue, err := json.Marshal(value); err == nil {
-				envData["FRANGO_JSON_"+key] = string(strValue)
-			}
-		}
-
-		// Also provide the full JSON body
-		if fullJSON, err := json.Marshal(requestData.JSONBody); err == nil {
-			envData["FRANGO_JSON_BODY"] = string(fullJSON)
-		}
-	}
-
-	// Add selected important headers with FRANGO_HEADER_ prefix
-	for key, values := range requestData.Headers {
-		if len(values) > 0 {
-			headerKey := strings.ReplaceAll(strings.ToUpper(key), "-", "_")
-			envData["FRANGO_HEADER_"+headerKey] = values[0]
-		}
-	}
-
-	// Populate Render Data if renderFn is provided
-	if renderFn != nil {
-		m.logger.Printf("Calling render function")
-		data := renderFn(w, r)
-		m.logger.Printf("Render data keys: %v", getMapKeys(data))
-		for key, value := range data {
-			jsonData, err := json.Marshal(value)
-			if err != nil {
-				m.logger.Printf("Error marshaling render data for '%s': %v", key, err)
-				continue
-			}
-			m.logger.Printf("Render data for '%s': %s", key, string(jsonData))
-			renderVarKey := "FRANGO_VAR_" + key
-			envData[renderVarKey] = string(jsonData)
-		}
-	}
-
-	// 2. Get or create PHP execution environment
-	// Ensure no query strings in script path passed to cache
-	cleanAbsScriptPath := absScriptPath
-	if queryIndex := strings.Index(cleanAbsScriptPath, "?"); queryIndex != -1 {
-		cleanAbsScriptPath = cleanAbsScriptPath[:queryIndex]
-	}
-	// Use the absolute script path as the key for the environment cache
-	env, err := m.envCache.GetEnvironment(cleanAbsScriptPath, cleanAbsScriptPath)
-	if err != nil {
-		m.logger.Printf("Error setting up environment for script '%s': %v", cleanAbsScriptPath, err)
-		http.Error(w, "Server error preparing PHP environment", http.StatusInternalServerError)
-		return
-	}
-
-	// 3. Get the pre-calculated relative path and construct the final path in the environment
-	relPath := env.ScriptRelPath
-	if relPath == "" {
-		m.logger.Printf("Internal Error: ScriptRelPath not found in environment for script '%s'", cleanAbsScriptPath)
-		http.Error(w, "Server error locating script in environment", http.StatusInternalServerError)
-		return
-	}
-	phpFilePathInEnv := filepath.Join(env.TempPath, relPath)
-	m.logger.Printf("Executing PHP script in env: '%s' (from source: '%s')", phpFilePathInEnv, absScriptPath)
-
-	// 4. Verify script file exists
-	fileInfo, err := os.Stat(phpFilePathInEnv)
-	if err != nil {
-		if os.IsNotExist(err) {
-			m.logger.Printf("PHP script not found in environment: '%s'. Attempting rebuild...", phpFilePathInEnv)
-			if err := m.envCache.populateEnvironmentFiles(env); err != nil {
-				m.logger.Printf("Error rebuilding environment for missing file: %v", err)
-				http.Error(w, "Server error locating script (rebuild failed)", http.StatusInternalServerError)
-				return
-			}
-			fileInfo, err = os.Stat(phpFilePathInEnv) // Check again
-			if err != nil {
-				m.logger.Printf("PHP script '%s' still not found after rebuild: %v", phpFilePathInEnv, err)
-				http.NotFound(w, r) // Or internal server error?
-				return
-			}
+	if !vfs.FileExists(scriptPath) {
+		// Try to normalize the path according to VFS conventions
+		absPath := m.resolveScriptPath(scriptPath)
+		if absPath != "" && vfs.FileExists(absPath) {
+			scriptPath = absPath
 		} else {
-			m.logger.Printf("Error stating PHP script '%s': %v", phpFilePathInEnv, err)
-			http.Error(w, "Server error locating script", http.StatusInternalServerError)
+			// http.NotFound(w, r)
+			return m.getErrorReportingHandler(fmt.Errorf("file not found: %s", scriptPath))
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Execute the PHP script with render data
+		m.ExecuteWithExecutor(vfs, scriptPath, renderFn, w, r)
+	})
+}
+
+// ForVFS returns an http.Handler for a specific PHP script in a specific VFS
+func (m *Middleware) ForVFS(vfs *vfs.VFS, scriptPath string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block direct access to .php URLs if configured
+		if m.blockDirectPHPURLs && strings.HasSuffix(r.URL.Path, ".php") {
+			// Check if this is explicitly registered for this path pattern
+			if r.Pattern == "" || !strings.HasSuffix(r.Pattern, ".php") {
+				http.NotFound(w, r)
+				return
+			}
+		}
+
+		// Check if file exists in VFS
+		if !vfs.FileExists(scriptPath) {
+			// Try to normalize the path according to VFS conventions
+			absPath := m.resolveScriptPath(scriptPath)
+			if absPath != "" && vfs.FileExists(absPath) {
+				scriptPath = absPath
+			} else {
+				http.NotFound(w, r)
+				return
+			}
+		}
+
+		// Execute the PHP script
+		m.ExecuteWithExecutor(vfs, scriptPath, nil, w, r)
+	})
+}
+
+// RenderVFS returns an http.Handler that renders a PHP script in a specific VFS with data from renderFn
+func (m *Middleware) RenderVFS(vfs *vfs.VFS, scriptPath string, renderFn RenderData) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if file exists in VFS
+		if !vfs.FileExists(scriptPath) {
+			// Try to normalize the path according to VFS conventions
+			absPath := m.resolveScriptPath(scriptPath)
+			if absPath != "" && vfs.FileExists(absPath) {
+				scriptPath = absPath
+			} else {
+				http.NotFound(w, r)
+				return
+			}
+		}
+
+		// Execute the PHP script with render data
+		m.ExecuteWithExecutor(vfs, scriptPath, renderFn, w, r)
+	})
+}
+
+// resolveScriptPath resolves a script path to a properly formatted VFS path
+func (m *Middleware) resolveScriptPath(scriptPath string) string {
+	// If it's already absolute filesystem path, we can't use it directly with VFS
+	// Return empty to indicate resolution failure
+	if filepath.IsAbs(scriptPath) {
+		return ""
+	}
+
+	// If it's a virtual path (starts with /), ensure it's properly formatted
+	if strings.HasPrefix(scriptPath, "/") {
+		return scriptPath
+	}
+
+	// Convert relative path to virtual path with leading slash
+	return "/" + scriptPath
+}
+
+// ExecuteWithExecutor handles execution of a PHP script through the VFS using the executor module.
+func (m *Middleware) ExecuteWithExecutor(vfs *vfs.VFS, scriptPath string, renderFn RenderData, w http.ResponseWriter, r *http.Request) {
+	// Ensure scriptPath is normalized if needed before passing
+	normalizedScriptPath := normalizePath(scriptPath)
+
+	// Determine the dev server port (0 if not configured)
+	devServerPort := 0
+	if m.devServerConfig != nil {
+		devServerPort = m.devServerConfig.Port
+	}
+
+	// Create an executor instance with the current middleware configuration
+	execConfig := executor.Config{
+		Logger:           m.logger,
+		DevelopmentMode:  m.developmentMode,
+		DisplayErrors:    m.displayErrors,
+		ErrorHandlerPath: m.errorHandlerPath,
+		// Pass auto-reload config
+		EnableAutoReload:        m.enableAutoReload,
+		AutoReloadScriptContent: m.autoReloadScriptContent, // The JS template
+		AutoReloadPagePath:      normalizedScriptPath,      // Pass the normalized script path
+		AutoReloadDevServerPort: devServerPort,             // Pass the dev server port (0 if not used)
+	}
+
+	exec := executor.NewExecutor(execConfig, vfs)
+
+	// Use the executor to run the script
+	exec.Execute(vfs, normalizedScriptPath, renderFn, w, r)
+}
+
+// --- Reload Event Hub (SSE Server-Side Filter Version) ---
+
+// HubClientSSE stores information about a connected SSE client
+type HubClientSSE struct {
+	channel  chan string // Channel for sending messages to this client
+	pagePath string      // The script path this client initially loaded
+}
+
+// ReloadEventHub manages connected clients for auto-reload functionality
+type ReloadEventHub struct {
+	// Use map from channel to the client struct for easy lookup/removal
+	sseClients      map[chan string]*HubClientSSE
+	sseClientsMutex sync.RWMutex
+
+	register   chan *HubClientSSE       // Channel for new clients
+	unregister chan *HubClientSSE       // Channel for clients leaving
+	broadcast  chan vfs.FileChangeEvent // Channel for file change events from VFS
+
+	// Polling related fields (kept for consistency)
+	lastChangeTime int64
+	changesMutex   sync.RWMutex
+
+	logger *log.Logger
+}
+
+// NewReloadEventHub creates a new event hub
+func NewReloadEventHub(logger *log.Logger) *ReloadEventHub {
+	hub := &ReloadEventHub{
+		sseClients:     make(map[chan string]*HubClientSSE),
+		register:       make(chan *HubClientSSE),
+		unregister:     make(chan *HubClientSSE),
+		broadcast:      make(chan vfs.FileChangeEvent, 10), // Buffered broadcast channel
+		lastChangeTime: time.Now().UnixNano() / int64(time.Millisecond),
+		logger:         logger,
+	}
+	go hub.runSSE() // Start the hub's processing loop
+	return hub
+}
+
+// runSSE starts the hub's main loop for handling SSE client registration,
+// unregistration, and filtered broadcasts.
+func (h *ReloadEventHub) runSSE() {
+	for {
+		select {
+		case client := <-h.register:
+			h.sseClientsMutex.Lock()
+			h.sseClients[client.channel] = client
+			h.logger.Printf("Reload Hub (SSE): Client registered for page %s. Total: %d", client.pagePath, len(h.sseClients))
+			h.sseClientsMutex.Unlock()
+
+		case client := <-h.unregister:
+			h.sseClientsMutex.Lock()
+			if currentClient, ok := h.sseClients[client.channel]; ok {
+				// Check if it's the same client instance trying to unregister
+				if currentClient == client { // Avoid race condition if channel was reused somehow
+					pagePath := client.pagePath // Get page path before deleting
+					delete(h.sseClients, client.channel)
+					// Don't close the channel here, let SSEReloadHandler's defer handle it
+					// close(client.channel)
+					h.logger.Printf("Reload Hub (SSE): Client unregistered for page %s. Total: %d", pagePath, len(h.sseClients))
+				}
+			}
+			h.sseClientsMutex.Unlock()
+
+		case event := <-h.broadcast:
+			// Update last change time for potential polling clients
+			h.changesMutex.Lock()
+			h.lastChangeTime = time.Now().UnixNano() / int64(time.Millisecond)
+			h.changesMutex.Unlock()
+
+			// Format event data once
+			eventData := map[string]interface{}{
+				"event": "modified",   // Keep event name consistent for client
+				"type":  "fileChange", // Keep type consistent for client
+				"path":  event.VirtualPath,
+				"time":  event.EventTime.Format(time.RFC3339),
+			}
+			jsonData, err := json.Marshal(eventData)
+			if err != nil {
+				h.logger.Printf("Reload Hub (SSE): Error marshalling event data: %v", err)
+				continue // Skip broadcast if marshalling fails
+			}
+
+			// Format SSE message once
+			sseMessage := fmt.Sprintf("event: fileChange\ndata: %s\n\n", jsonData)
+
+			// Send filtered messages (read lock allows concurrent reads)
+			h.sseClientsMutex.RLock()
+			h.logger.Printf("Reload Hub (SSE): Processing broadcast for event on %s (%s)", event.VirtualPath, event.ChangeType)
+
+			clientsToRemove := []chan string{} // Collect slow/closed clients
+			for channel, client := range h.sseClients {
+				// *** FILTERING LOGIC ***
+				// Reload if the changed file matches the page the client loaded
+				// TODO: Add more sophisticated filtering (e.g., for global CSS/JS, includes?)
+				if event.VirtualPath == client.pagePath {
+					h.logger.Printf("Reload Hub (SSE): Match found! Sending update for %s to client for page %s", event.VirtualPath, client.pagePath)
+					// Use non-blocking send with timeout
+					select {
+					case channel <- sseMessage:
+						// Successfully sent
+					case <-time.After(250 * time.Millisecond): // Increased timeout slightly
+						h.logger.Printf("Reload Hub (SSE): Client send timeout for page %s, queueing for removal.", client.pagePath)
+						clientsToRemove = append(clientsToRemove, channel)
+					}
+				}
+			}
+			h.sseClientsMutex.RUnlock()
+
+			// Remove slow/closed clients (needs write lock)
+			if len(clientsToRemove) > 0 {
+				h.sseClientsMutex.Lock()
+				for _, channel := range clientsToRemove {
+					if client, ok := h.sseClients[channel]; ok {
+						pagePath := client.pagePath // Get path for logging
+						delete(h.sseClients, channel)
+						close(channel) // Close the channel to signal the SSEReloadHandler's loop
+						h.logger.Printf("Reload Hub (SSE): Removed slow/closed client for page %s.", pagePath)
+					}
+				}
+				h.logger.Printf("Reload Hub (SSE): Clients after cleanup: %d", len(h.sseClients))
+				h.sseClientsMutex.Unlock()
+			}
+		}
+	}
+}
+
+// BroadcastFileChange sends a file change event to the hub's broadcast channel
+func (h *ReloadEventHub) BroadcastFileChange(event vfs.FileChangeEvent) {
+	select {
+	case h.broadcast <- event:
+		h.logger.Printf("Reload Hub: Queued event for %s (%s)", event.VirtualPath, event.ChangeType)
+	default:
+		h.logger.Printf("Reload Hub: Broadcast channel full, dropping event for %s (%s)", event.VirtualPath, event.ChangeType)
+	}
+}
+
+// SSEReloadHandler handles Server-Sent Events connections for auto-reload
+func (m *Middleware) SSEReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if m.reloadHub == nil || !m.enableAutoReload {
+		http.Error(w, "Auto-reload not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// --- Get Page Path from Query Param ---
+	pageQuery := r.URL.Query().Get("page")
+	if pageQuery == "" {
+		m.logger.Println("Reload Hub (SSE): Connection rejected. Missing 'page' query parameter.")
+		http.Error(w, "Missing 'page' query parameter", http.StatusBadRequest)
+		return
+	}
+	// Use the normalization function
+	pagePath := normalizePath(pageQuery)
+	m.logger.Printf("Reload Hub (SSE): Connection attempt for page: %s", pagePath)
+	// --- End Get Page Path ---
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*") // Consider restricting
+
+	// Create client channel and struct
+	clientChan := make(chan string, 10) // Buffered channel
+	client := &HubClientSSE{
+		channel:  clientChan,
+		pagePath: pagePath,
+	}
+
+	// Register client with the hub
+	m.reloadHub.register <- client
+
+	// Unregister when handler exits
+	defer func() {
+		m.reloadHub.unregister <- client
+		// The channel is closed by the hub.runSSE() when unregistering or on timeout
+	}()
+
+	// Send initial connected message
+	fmt.Fprintf(w, "event: connected\ndata: {\"time\": \"%s\"}\n\n", time.Now().Format(time.RFC3339))
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done(): // Client disconnected
+			m.logger.Printf("Reload Hub (SSE): Client disconnected for page %s.", client.pagePath)
+			return
+		case msg, ok := <-clientChan:
+			if !ok { // Channel closed by hub (likely due to send timeout/cleanup or unregister)
+				m.logger.Printf("Reload Hub (SSE): Hub closed channel for page %s.", client.pagePath)
+				return
+			}
+			_, err := fmt.Fprint(w, msg)
+			if err != nil {
+				m.logger.Printf("Reload Hub (SSE): Error writing to client for page %s: %v", client.pagePath, err)
+				return // Error writing, likely client disconnected
+			}
+			flusher.Flush() // Flush the message to the client
+		}
+	}
+}
+
+// PollingReloadHandler handles polling requests for file changes
+func (m *Middleware) PollingReloadHandler(w http.ResponseWriter, r *http.Request) {
+	if m.reloadHub == nil || !m.enableAutoReload {
+		http.Error(w, "Auto-reload not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*") // Consider restricting
+
+	lastParam := r.URL.Query().Get("last")
+	var lastClientCheck int64
+	if lastParam != "" {
+		lastClientCheck, _ = strconv.ParseInt(lastParam, 10, 64) // Ignore error, defaults to 0
+	}
+
+	m.reloadHub.changesMutex.RLock()
+	lastChangeTime := m.reloadHub.lastChangeTime
+	m.reloadHub.changesMutex.RUnlock()
+
+	currentTime := time.Now().UnixNano() / int64(time.Millisecond)
+	hasChanges := lastClientCheck > 0 && lastChangeTime > lastClientCheck
+
+	response := map[string]interface{}{
+		"timestamp":  currentTime,
+		"hasChanges": hasChanges,
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		m.logger.Printf("Reload Hub: Error encoding polling response: %v", err)
+	}
+}
+
+// --- End Reload Event Hub ---
+
+// --- Auto-Reload Route Registration ---
+
+// RegisterReloadRoutes registers the necessary HTTP endpoints for auto-reload
+// with the provided ServeMux or router.
+func (m *Middleware) RegisterReloadRoutes(mux *http.ServeMux) {
+	if !m.enableAutoReload {
+		m.logger.Println("Auto-reload disabled, skipping route registration.")
+		return
+	}
+
+	if mux == nil {
+		m.logger.Println("Error: Cannot register reload routes, provided mux is nil.")
+		return
+	}
+
+	trigger := m.getReloadTriggerType()
+	m.logger.Printf("Registering auto-reload routes (Trigger: %s)", trigger)
+
+	if trigger == "sse" || trigger == "websocket" { // Assuming WS might use SSE endpoint initially
+		mux.HandleFunc("/_/frango/SSE", m.SSEReloadHandler)
+		m.logger.Println("Registered SSE handler at /_/frango/SSE")
+	}
+	// TODO: Add WebSocket handler registration when implemented
+	// if trigger == "websocket" {
+	//  mux.HandleFunc("/_frango_reload_ws", m.WebSocketReloadHandler)
+	// }
+	if trigger == "polling" {
+		mux.HandleFunc("/_frango_reload_poll", m.PollingReloadHandler)
+		m.logger.Println("Registered Polling handler at /_frango_reload_poll")
+	}
+}
+
+// Helper function (ensure it's defined)
+func normalizePath(path string) string {
+	if path == "" || path == "." {
+		return "/"
+	}
+	// Ensure path starts with /
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	// Replace backslashes with forward slashes
+	path = strings.ReplaceAll(path, "\\", "/")
+	// Clean the path (removes ., .., merges //)
+	// Use path package for consistent forward slashes
+	cleanedPath := filepath.Clean(path)
+	// Important: filepath.Clean might return "." if input is just "/", handle this
+	if cleanedPath == "." {
+		return "/"
+	}
+	// Ensure it still starts with / after cleaning
+	if !strings.HasPrefix(cleanedPath, "/") {
+		cleanedPath = "/" + cleanedPath
+	}
+	return cleanedPath
+}
+
+// phpContextKey is a custom type for context keys
+type phpContextKey string
+
+// enableCORS wraps a handler with basic CORS headers for development.
+// Allows requests from any origin.
+func enableCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow any origin
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
-	}
-	if fileInfo.IsDir() {
-		m.logger.Printf("ERROR: Target script path is a directory: '%s'", phpFilePathInEnv)
-		http.Error(w, "Configuration error: script path is a directory", http.StatusInternalServerError)
-		return
-	}
 
-	// 5. Prepare FrankenPHP request options
-	// Document root is the PARENT directory of the script within the temp env
-	documentRoot := filepath.Dir(phpFilePathInEnv)
-	scriptName := "/" + relPath // Ensure leading slash
-
-	// If relPath already contains directory components, use just the filename
-	// This avoids paths like "/routing/routing/file.php"
-	if strings.Contains(relPath, "/") {
-		scriptName = "/" + filepath.Base(relPath)
-	}
-
-	m.logger.Printf("FrankenPHP Setup: DocumentRoot='%s', ScriptName='%s', URL='%s'", documentRoot, scriptName, r.URL.String())
-
-	// Path globals PHP file
-	pathGlobalsFile := filepath.Join(env.TempPath, "_frango_path_globals.php")
-
-	// Check if the path globals file exists
-	_, pathGlobalsErr := os.Stat(pathGlobalsFile)
-	if pathGlobalsErr != nil {
-		m.logger.Printf("Warning: Path globals file not found: %v", pathGlobalsErr)
-	} else {
-		// Add auto-prepend file to include path globals
-		m.logger.Printf("Adding path globals auto-prepend: %s", pathGlobalsFile)
-
-		// Auto-prepend doesn't work consistently across PHP versions and environments
-		// Instead, we'll explicitly set it via the environment
-		envData["PHP_AUTO_PREPEND_FILE"] = pathGlobalsFile
-		envData["PHP_INCLUDE_PATH"] = env.TempPath
-	}
-
-	// Inject envData (render vars, path params) and query params
-	phpBaseEnv := map[string]string{
-		// *** DO NOT SET SCRIPT_FILENAME here *** - Rely on DocRoot + modified request path
-		"SCRIPT_NAME":    scriptName,          // e.g., /index.php
-		"PHP_SELF":       scriptName,          // Match SCRIPT_NAME
-		"DOCUMENT_ROOT":  documentRoot,        // Parent dir of script
-		"REQUEST_URI":    requestData.FullURL, // Use the same full URL
-		"REQUEST_METHOD": requestData.Method,
-		"QUERY_STRING":   r.URL.RawQuery,
-		"HTTP_HOST":      r.Host,
-		"REMOTE_ADDR":    requestData.RemoteAddr,
-		// Debugging info
-		"DEBUG_DOCUMENT_ROOT": documentRoot,
-		"DEBUG_SCRIPT_NAME":   scriptName,
-		"DEBUG_PHP_FILE_PATH": phpFilePathInEnv, // Full path for debugging
-		"DEBUG_SOURCE_PATH":   absScriptPath,
-		"DEBUG_ENV_ID":        env.ID,
-	}
-
-	// Add in all our extracted data
-	for key, value := range envData {
-		phpBaseEnv[key] = value
-	}
-
-	if !m.developmentMode {
-		phpBaseEnv["PHP_OPCACHE_ENABLE"] = "1"
-	} else {
-		phpBaseEnv["PHP_FCGI_MAX_REQUESTS"] = "1"
-	}
-	m.logger.Printf("Total PHP environment variables: %d", len(phpBaseEnv))
-
-	// 6. Create and execute FrankenPHP request
-	reqClone := r.Clone(r.Context())
-	// *** Modify the cloned request path to match the script name ***
-	reqClone.URL.Path = scriptName
-	m.logger.Printf("Modified request clone path for FrankenPHP: %s", reqClone.URL.Path)
-
-	req, err := frankenphp.NewRequestWithContext(
-		reqClone, // Use the modified request
-		frankenphp.WithRequestDocumentRoot(documentRoot, false), // Parent dir as DocRoot
-		frankenphp.WithRequestEnv(phpBaseEnv),                   // Env *without* SCRIPT_FILENAME
-	)
-	if err != nil {
-		m.logger.Printf("Error creating PHP request: %v", err)
-		http.Error(w, "Server error creating PHP request", http.StatusInternalServerError)
-		return
-	}
-
-	if err := frankenphp.ServeHTTP(w, req); err != nil {
-		m.logger.Printf("Error executing PHP script '%s': %v", phpFilePathInEnv, err)
-		http.Error(w, "PHP execution error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-}
-
-// php12PatternContextKey extracts the pattern from Go 1.22 ServeMux context
-// This is a helper function to extract the pattern from the context in Go 1.22+
-func php12PatternContextKey(ctx context.Context) string {
-	// Try several known context keys for Go 1.22 ServeMux
-	for _, key := range []interface{}{"pattern", "http.pattern", phpContextKey("pattern"), phpContextKey("http.pattern")} {
-		if val, ok := ctx.Value(key).(string); ok && val != "" {
-			return val
-		}
-	}
-
-	// Try a more exhaustive approach - inspect context for any pattern-like keys
-	type ctxKey struct{}
-	contextDump := fmt.Sprintf("%+v", ctx.Value(ctxKey{}))
-	if strings.Contains(contextDump, "pattern") {
-		log.Printf("Context contains pattern key but unable to extract: %s", contextDump)
-	}
-
-	return ""
-}
-
-// ExtractRequestData pulls all relevant data from an HTTP request
-func ExtractRequestData(r *http.Request) *RequestData {
-	// Parse form and multipart form data
-	r.ParseForm()
-	r.ParseMultipartForm(32 << 20) // 32MB max
-
-	// Get path segments
-	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-
-	// Try to parse JSON body if content type indicates JSON
-	var jsonBody map[string]interface{}
-	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		// Save the body so it can still be read later
-		var bodyBytes []byte
-		if r.Body != nil {
-			bodyBytes, _ = io.ReadAll(r.Body)
-			// Restore the body for other handlers
-			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
-			// Attempt to decode as JSON
-			_ = json.Unmarshal(bodyBytes, &jsonBody)
-		}
-	}
-
-	// Build the complete request data
-	return &RequestData{
-		Method:       r.Method,
-		FullURL:      r.URL.String(),
-		Path:         r.URL.Path,
-		RemoteAddr:   r.RemoteAddr,
-		Headers:      r.Header,
-		QueryParams:  r.URL.Query(),
-		PathSegments: segments,
-		JSONBody:     jsonBody,
-		FormData:     r.Form,
-	}
+		h.ServeHTTP(w, r)
+	})
 }

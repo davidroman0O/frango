@@ -1,0 +1,102 @@
+# Features
+
+## VFS (Virtual File System)
+[X] **Core Lifecycle:**
+    [X] VFS Creation (`NewVFSWithConfig`)
+    [X] VFS Branching (`Branch`) with parent inheritance
+    [X] VFS Cleanup (`Cleanup`) with reference counting
+[X] **File Types & Origins:**
+    [X] Add source files from filesystem (`AddSourceFile`, `AddSourceDirectory`)
+    [X] Add embedded files/directories (`AddEmbeddedFile`, `AddEmbeddedDirectory`)
+    [X] Create virtual files in memory/temp (`CreateVirtualFile`)
+    [X] Track file origins (Source, Embed, Virtual)
+[X] **File Operations:**
+    [X] Get file content (`GetFileContent`)
+    [X] Check file existence (`FileExists`)
+    [X] Copy files (`CopyFileWithOptions`) with optional origin preservation
+    [X] Move files (`MoveFileWithOptions`) with optional origin preservation
+    [X] Delete files (`DeleteFile`) with shadowing for inherited files
+    [X] List all files (`ListFiles`)
+    [X] List files within a specific directory (`ListFilesIn`)
+[X] **Path Handling:**
+    [X] Resolve virtual paths to physical paths (`ResolvePath`)
+    [X] Resolve literal paths without normalization (`ResolvePathLiteral`)
+    [X] Normalize paths (`normalizePath`)
+    [X] Track logical paths for `__FILE__`/`__DIR__` (`TrackLogicalPath`, `GetLogicalPath`)
+[X] **Concurrency & Performance:**
+    [X] Granular mutex locking (general, path, file, cache, ref count)
+    [X] Path caching (for resolved paths in non-dev mode)
+    [X] Content caching (for file content in non-dev mode)
+[X] **Development Features:**
+    [X] Global File Watcher (`GlobalWatcher`)
+    [X] File Change Event System (`FileChangeEvent`, `AddChangeHandler`, `notifyFileChanged`)
+    [X] Hash-based change detection for source files
+[X] **PHP Integration:**
+    [X] PHP Globals script management (`initializeGlobals`, `GlobalsProvider`)
+
+## Executor (PHP Script Execution)
+[X] **Core Execution:**
+    [X] Execute PHP scripts via FrankenPHP (`Execute`, `executePhpWithRecorder`)
+    [X] Use `httptest.ResponseRecorder` to capture output
+[X] **Request Handling:**
+    [X] Extract comprehensive request data (`RequestData`, `extractRequestData`)
+    [X] Resolve script paths using VFS (`resolveScriptPath`, `ensurePhpFileExists`)
+[X] **Environment Setup:**
+    [X] Prepare Go-level environment data (`prepareEnvironmentData`)
+    [X] Build comprehensive PHP environment (`buildPhpEnvironment`)
+    [X] Populate standard PHP superglobals (`$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, `$_REQUEST`, `$_SERVER`)
+    [X] Populate custom/helper globals (`$_PATH`, `$_JSON`, `$_TEMPLATE`, `$_PATH_SEGMENTS`)
+    [X] Merge path parameters into `$_GET` (via PHP globals script)
+    [X] Handle `multipart/form-data` and `application/json` request bodies
+    [X] Pass template variables (`RenderData`)
+    [X] Set standard `$_SERVER` variables (e.g., `SCRIPT_FILENAME`, `DOCUMENT_ROOT`, `REQUEST_URI`, `HTTP_*` headers)
+    [X] Configure basic PHP INI settings via env (`display_errors`, `opcache`, timeouts)
+[X] **Error Handling:**
+    [X] Detect PHP errors from output (`CheckPHPErrors` -> `php.CheckErrors`)
+    [X] Handle execution errors from FrankenPHP
+    [X] Integrate custom PHP error handler script (`ErrorHandlerPath`)
+    [X] Provide default error responses based on dev mode/display settings
+    [X] `PHPExecutionError` struct for combined error info
+
+## php (PHP Utilities Package)
+[X] **Error Detection:**
+    [X] Identify Fatal, Warning, Notice errors from output (`CheckErrors`, `ErrorIndicators`)
+    [X] Testing helpers (`AssertNoErrors`, `CustomErrorCheck`)
+[X] **Globals Script:**
+    [X] Standard PHP Globals provider (`StandardGlobalsProvider`)
+    [X] Comprehensive globals script with superglobal setup, helper functions, and error handling setup
+[X] **Utilities:**
+    [X] Path hashing (`CalculatePathHash`)
+    [X] Path sanitization for PHP (`SanitizePhpPath`)
+    [X] Standard globals path (`GetGlobalsPath`)
+
+## frango (Main Middleware Package)
+[X] **Middleware Core:**
+    [X] Middleware struct (`Middleware`) with configuration
+    [X] Initialization (`New`) including FrankenPHP init
+    [X] Shutdown (`Shutdown`) including FrankenPHP and temp dir cleanup
+[X] **Configuration:**
+    [X] Fluent configuration options (`With*` functions)
+    [X] Options for TempDir, Logger, DevMode, ErrorDisplay, ErrorHandler, AutoReload, DevServer, etc.
+[X] **VFS Integration:**
+    [X] Root VFS management (creation, access, branching via `NewVFS`)
+    [X] Methods to interact with the root VFS (Add*, Create*, Copy*, Move*, Delete*, List*, Get*)
+[X] **Request Routing/Handling:**
+    [X] Handlers for specific scripts (`For`, `ForVFS`)
+    [X] Handlers with template data (`Render`, `RenderVFS`)
+    [X] Integration with the `Executor` package (`ExecuteWithExecutor`)
+    [X] Option to block direct `.php` URL access (`WithBlockDirectPHPURLs`)
+[X] **Development Workflow:**
+    [X] Development Mode (`WithDevelopmentMode`)
+    [X] Auto-Reload Feature (`WithAutoReload`, `WithAutoReloadTrigger`, `WithCustomAutoReloadScript`)
+        [X] SSE trigger support
+        [X] Polling trigger support
+        [X] JavaScript injection for reload triggers
+    [X] Optional separate Dev Server (`WithDevServer`)
+        [X] Serves SSE endpoint
+        [X] Basic CORS enabled for dev server
+    [X] Auto-Reload Event Hub (`ReloadEventHub`)
+    [X] Route registration helpers for reload endpoints (`RegisterReloadRoutes`)
+[X] **Error Handling:**
+    [X] Basic HTML error reporting handler for middleware-level errors (`getErrorReportingHandler`)
+
