@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,33 +14,39 @@ import (
 
 // AddSourceFile adds a file from the filesystem to the VFS
 func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
+	// Try to resolve the sourcePath if it's a relative path
+	resolvedPath, err := v.resolveSourceFilePath(sourcePath)
+	if err != nil {
+		return err
+	}
+
 	// Normalize virtual path
 	virtualPath = normalizePath(virtualPath)
 
 	// First check for symlinks without any locks
-	fileInfo, err := os.Lstat(sourcePath)
+	fileInfo, err := os.Lstat(resolvedPath)
 	if err != nil {
-		return fmt.Errorf("error accessing source file '%s': %w", sourcePath, err)
+		return fmt.Errorf("error accessing source file '%s': %w", resolvedPath, err)
 	}
 
 	// Prevent symlinks for security reasons
 	if fileInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("symlinks are not supported for security reasons: %s", sourcePath)
+		return fmt.Errorf("symlinks are not supported for security reasons: %s", resolvedPath)
 	}
 
 	// Calculate hash for change detection without locks
-	hash, err := utils.CalculateFileHash(sourcePath)
+	hash, err := utils.CalculateFileHash(resolvedPath)
 	if err != nil {
-		return fmt.Errorf("error calculating hash for '%s': %w", sourcePath, err)
+		return fmt.Errorf("error calculating hash for '%s': %w", resolvedPath, err)
 	}
 
 	// Now lock the VFS for structural changes
 	v.mutex.Lock()
 
 	// Store mappings
-	v.sourceMappings[virtualPath] = sourcePath
+	v.sourceMappings[virtualPath] = resolvedPath
 	v.fileOrigins[virtualPath] = OriginSource
-	v.fileHashes[sourcePath] = FileHash{
+	v.fileHashes[resolvedPath] = FileHash{
 		Hash:      hash,
 		Timestamp: time.Now(),
 	}
@@ -47,30 +54,152 @@ func (v *VFS) AddSourceFile(sourcePath, virtualPath string) error {
 	v.mutex.Unlock()
 
 	// Track logical path (virtual path) for this physical path
-	v.TrackLogicalPath(sourcePath, virtualPath)
+	v.TrackLogicalPath(resolvedPath, virtualPath)
 
-	v.logger.Printf("Added source file: %s -> %s (hash: %s)", sourcePath, virtualPath, utils.TruncateHash(hash, 8))
+	v.logger.Printf("Added source file: %s -> %s (hash: %s)", resolvedPath, virtualPath, utils.TruncateHash(hash, 8))
 
 	// Register with global watcher if in development mode
 	if v.developMode {
-		GetGlobalWatcher().RegisterFile(v, sourcePath)
+		GetGlobalWatcher().RegisterFile(v, resolvedPath)
 
 		// Notify file added event
 		v.logger.Printf("AddSourceFile: Triggering notifyFileChanged(added) for %s", virtualPath)
-		v.notifyFileChanged(virtualPath, sourcePath, "added")
+		v.notifyFileChanged(virtualPath, resolvedPath, "added")
 	} else {
 		// Update path cache
 		v.cacheMutex.Lock()
-		v.pathCache[virtualPath] = sourcePath
+		v.pathCache[virtualPath] = resolvedPath
 		v.cacheMutex.Unlock()
 	}
 
 	return nil
 }
 
+// resolveSourceFilePath attempts to resolve a source file path intelligently
+// based on the execution context
+func (v *VFS) resolveSourceFilePath(sourcePath string) (string, error) {
+	// If it's an absolute path, use it directly
+	if path.IsAbs(sourcePath) {
+		return sourcePath, nil
+	}
+
+	// First, try the path as provided (relative to current working directory)
+	if _, err := os.Stat(sourcePath); err == nil {
+		absPath, err := filepath.Abs(sourcePath)
+		if err == nil {
+			v.logger.Printf("Resolved source file path: %s (absolute: %s)", sourcePath, absPath)
+			return absPath, nil
+		}
+	}
+
+	// If that fails, try common execution patterns:
+	// 1. Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		v.logger.Printf("Warning: Could not get current working directory: %v", err)
+		return sourcePath, nil // Return original as fallback
+	}
+
+	// Try different relative paths based on common project layouts
+	possiblePaths := []string{
+		sourcePath,                     // Original (relative to CWD)
+		filepath.Join(cwd, sourcePath), // Absolute from CWD
+		filepath.Join(cwd, "examples", "demo", sourcePath), // If in project root with examples/demo structure
+		filepath.Join(filepath.Dir(cwd), sourcePath),       // If in a subdirectory
+	}
+
+	// If sourcePath starts with ./ or ../, handle special cases
+	if strings.HasPrefix(sourcePath, "./") || strings.HasPrefix(sourcePath, "../") {
+		trimmedPath := strings.TrimPrefix(sourcePath, "./")
+		possiblePaths = append(possiblePaths,
+			filepath.Join(cwd, trimmedPath),
+			filepath.Join(cwd, "examples", "demo", trimmedPath),
+		)
+	}
+
+	// Try each possible path
+	for _, testPath := range possiblePaths {
+		if _, err := os.Stat(testPath); err == nil {
+			absPath, err := filepath.Abs(testPath)
+			if err == nil {
+				v.logger.Printf("Resolved source file from %s to: %s", sourcePath, absPath)
+				return absPath, nil
+			}
+		}
+	}
+
+	// If all resolution attempts fail, return the original and let the caller handle errors
+	v.logger.Printf("Warning: Could not resolve source file path: %s - using as-is", sourcePath)
+	return sourcePath, nil
+}
+
 // AddSourceDirectory adds all PHP files from a directory to the VFS
 func (v *VFS) AddSourceDirectory(sourceDir string, virtualBasePath string) error {
-	return v.addSourceDirectoryRecursive(sourceDir, virtualBasePath, true)
+	// Try to resolve the sourceDir if it's a relative path
+	resolvedDir, err := v.resolveSourceDirPath(sourceDir)
+	if err != nil {
+		return err
+	}
+
+	return v.addSourceDirectoryRecursive(resolvedDir, virtualBasePath, true)
+}
+
+// resolveSourceDirPath attempts to resolve a source directory path intelligently
+// based on the execution context
+func (v *VFS) resolveSourceDirPath(sourceDir string) (string, error) {
+	// If it's an absolute path, use it directly
+	if path.IsAbs(sourceDir) {
+		return sourceDir, nil
+	}
+
+	// First, try the path as provided (relative to current working directory)
+	if _, err := os.Stat(sourceDir); err == nil {
+		absPath, err := filepath.Abs(sourceDir)
+		if err == nil {
+			v.logger.Printf("Resolved source directory path: %s (absolute: %s)", sourceDir, absPath)
+			return absPath, nil
+		}
+	}
+
+	// If that fails, try common execution patterns:
+	// 1. Get current working directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		v.logger.Printf("Warning: Could not get current working directory: %v", err)
+		return sourceDir, nil // Return original as fallback
+	}
+
+	// Try different relative paths based on common project layouts
+	possiblePaths := []string{
+		sourceDir,                     // Original (relative to CWD)
+		filepath.Join(cwd, sourceDir), // Absolute from CWD
+		filepath.Join(cwd, "examples", "demo", sourceDir), // If in project root with examples/demo structure
+		filepath.Join(filepath.Dir(cwd), sourceDir),       // If in a subdirectory
+	}
+
+	// If sourceDir starts with ./ or ../, handle special cases
+	if strings.HasPrefix(sourceDir, "./") || strings.HasPrefix(sourceDir, "../") {
+		trimmedPath := strings.TrimPrefix(sourceDir, "./")
+		possiblePaths = append(possiblePaths,
+			filepath.Join(cwd, trimmedPath),
+			filepath.Join(cwd, "examples", "demo", trimmedPath),
+		)
+	}
+
+	// Try each possible path
+	for _, testPath := range possiblePaths {
+		if _, err := os.Stat(testPath); err == nil {
+			absPath, err := filepath.Abs(testPath)
+			if err == nil {
+				v.logger.Printf("Resolved source directory from %s to: %s", sourceDir, absPath)
+				return absPath, nil
+			}
+		}
+	}
+
+	// If all resolution attempts fail, return the original and let the caller handle errors
+	v.logger.Printf("Warning: Could not resolve source directory path: %s - using as-is", sourceDir)
+	return sourceDir, nil
 }
 
 // addSourceDirectoryRecursive adds all PHP files from a directory to the VFS
